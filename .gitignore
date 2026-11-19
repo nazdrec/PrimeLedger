@@ -1,0 +1,24 @@
+# The user's own files: inventory, settings, encrypted keys, logs, cache, screenshots.
+# They belong to the person who runs the app and are never published.
+data/
+screenshots/
+*.lnk
+
+# Build and the folder prepared for publishing
+.build/
+dist/
+build/
+release/
+*.spec
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Editors and the system
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

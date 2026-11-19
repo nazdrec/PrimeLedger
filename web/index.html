@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="{{lang}}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>{{app}}</title>
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="styles.css">
+<script>
+  // apply the saved theme before first paint
+  try { var savedTheme = localStorage.getItem("primesets-theme"); if (savedTheme === "light" || savedTheme === "dark") document.documentElement.dataset.theme = savedTheme; } catch (e) {}
+</script>
+</head>
+<body>
+<div class="glow" aria-hidden="true"></div>
+
+<header class="top">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true">
+      <svg viewBox="0 0 24 24" width="22" height="22"><path d="M12 2.5 20.5 12 12 21.5 3.5 12Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 7.5 16 12l-4 4.5L8 12Z" fill="currentColor"/></svg>
+    </span>
+    <div>
+      <h1>{{app}}</h1>
+      <p class="brand-sub" id="inv-status">{{t:Загрузка…}}</p>
+    </div>
+  </div>
+  <div class="top-actions">
+    <button class="btn ghost icon-only" id="btn-theme" title="{{t:Светлая или тёмная тема}}" aria-label="{{t:Сменить тему}}"></button>
+    <button class="btn ghost icon-only" id="btn-settings" title="{{t:Настройки: язык и подключение для распознавания}}" aria-label="{{t:Настройки}}">
+      <span class="ico" data-ico="gear"></span>
+    </button>
+    <button class="btn ghost" id="btn-history" title="{{t:Что менялось в инвентаре и сколько стоят готовые комплекты}}">
+      <span class="ico" data-ico="clock"></span><span>{{t:История}}</span>
+    </button>
+    <button class="btn ghost" id="btn-prices" title="{{t:Заново запросить цены на warframe.market}}">
+      <span class="ico" data-ico="refresh"></span><span>{{t:Обновить цены}}</span>
+    </button>
+    <button class="btn primary" id="btn-update">
+      <span class="ico" data-ico="image"></span><span>{{t:Обновить инвентарь}}</span>
+    </button>
+  </div>
+</header>
+
+<main id="main">
+  <section class="notice" id="catalog-banner" hidden></section>
+  <section class="notice warn" id="review-banner" hidden></section>
+  <section class="notice" id="pending-banner" hidden></section>
+  <section class="notice" id="changes-banner" hidden></section>
+
+  <section class="tiles" id="tiles" aria-label="{{t:Сводка}}"></section>
+
+  <nav class="bar" aria-label="{{t:Разделы}}">
+    <div class="tabs" role="tablist" id="tabs"></div>
+    <div class="bar-right">
+      <label class="search">
+        <span class="ico" data-ico="search"></span>
+        <input type="search" id="search" placeholder="{{t:Поиск}}" autocomplete="off" spellcheck="false">
+      </label>
+    </div>
+  </nav>
+
+  <div class="progress" id="progress" hidden><div class="progress-fill" id="progress-fill"></div></div>
+
+  <section id="view"></section>
+
+  <details class="legend" id="legend">
+    <summary><span class="ico" data-ico="info"></span>{{t:Как посчитано и откуда данные}}</summary>
+    <div class="legend-body" id="legend-body"></div>
+  </details>
+</main>
+
+<dialog id="dlg-update" class="dialog"></dialog>
+<dialog id="dlg-history" class="dialog wide"></dialog>
+<dialog id="dlg-listing" class="dialog"></dialog>
+<dialog id="dlg-settings" class="dialog"></dialog>
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+<div class="tooltip" id="tooltip" hidden></div>
+<div class="offline" id="offline" hidden>
+  <div class="offline-card">
+    <h2>{{t:Приложение остановлено}}</h2>
+    <p>{{t:Связь с программой пропала. Закройте это окно и запустите приложение снова.}}</p>
+  </div>
+</div>
+
+<script src="i18n.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
