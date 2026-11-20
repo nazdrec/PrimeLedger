@@ -379,10 +379,15 @@ def ducat_sets(state: AppState) -> Dict[str, Any]:
 
 
 def whisper(user: str, item_en: str, platinum: Any, count: int = 1) -> str:
-    """The line warframe.market itself offers to copy: the buyer pastes it into the game chat by hand."""
-    if count > 1:
-        return f'/w {user} Hi! I want to buy: "{item_en}" x{count} for {platinum} platinum each. (warframe.market)'
-    return f'/w {user} Hi! I want to buy: "{item_en}" for {platinum} platinum. (warframe.market)'
+    """The message for a seller: the buyer pastes it into the game chat by hand.
+
+    warframe.market's API rules ask an application to give this message in the same format as the
+    site and to include the application's name.  So the site's own line is kept exactly as it is,
+    and what the application adds comes after it: its name and, when several are bought, how many.
+    """
+    line = f'/w {user} Hi! I want to buy: "{item_en}" for {platinum} platinum. (warframe.market)'
+    own = f"x{count}, via {APP_NAME}" if count > 1 else f"via {APP_NAME}"
+    return f"{line} ({own})"
 
 
 def ducat_plan(state: AppState, target: int, exclude: Optional[List[str]] = None) -> Dict[str, Any]:

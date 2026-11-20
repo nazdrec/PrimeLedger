@@ -94,7 +94,8 @@ Any number can be corrected by hand on the *All parts* tab, and a mastery mark b
   API and the official drop tables page of Digital Extremes.
 - Requests to warframe.market go one at a time, at most two per second (the site allows three),
   and answers are cached. The app places no orders and sends nothing to the game chat: messages
-  to sellers are copied by you.
+  to sellers are copied by you. A message keeps the site's own format and names the app, as the
+  site's API rules ask.
 - When Claude Code or Codex reads a screenshot it runs in a restricted mode: it can only look at
   the pictures in a temporary folder, cannot run commands and cannot reach other files.
 

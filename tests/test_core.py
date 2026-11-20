@@ -534,15 +534,29 @@ class Ducats(unittest.TestCase):
         self.assertEqual((plan["platinum"], plan["ducats"], plan["reached"], plan["priced"]), (12, 120, True, 2))
         self.assertEqual([(s["user"], s["title"], s["count"], s["cost"], s["gain"]) for s in plan["steps"]],
                          [("Alice", "Мираж Прайм", 2, 12, 120)])
+        # the site's own line, word for word, and after it what the application adds: how many and its name
         self.assertEqual(plan["steps"][0]["message"],
-                         '/w Alice Hi! I want to buy: "Mirage Prime Set" x2 for 6 platinum each. (warframe.market)')
+                         '/w Alice Hi! I want to buy: "Mirage Prime Set" for 6 platinum. (warframe.market)'
+                         ' (x2, via PrimeLedger)')
         self.assertEqual(plan["oldest_at"], 1700000000.0)
         # the seller does not answer: plan again without that offer
         plan = server.ducat_plan(state, 100, ["mirage_prime_set|Alice"])
         self.assertEqual([(s["user"], s["count"]) for s in plan["steps"]], [("Bob", 1)])
         self.assertEqual((plan["ducats"], plan["reached"]), (45, False))
         self.assertEqual(plan["steps"][0]["message"],
-                         '/w Bob Hi! I want to buy: "Vasto Prime Set" for 10 platinum. (warframe.market)')
+                         '/w Bob Hi! I want to buy: "Vasto Prime Set" for 10 platinum. (warframe.market)'
+                         ' (via PrimeLedger)')
+
+    def test_the_message_for_a_seller_keeps_the_line_of_the_site_and_names_the_application(self):
+        # warframe.market's API rules: the same format as on the site, and the name of the application
+        from primesets import APP_NAME, server
+        site = '/w Carol Hi! I want to buy: "Rhino Prime Set" for 80 platinum. (warframe.market)'
+        for count in (1, 3):
+            message = server.whisper("Carol", "Rhino Prime Set", 80, count)
+            self.assertTrue(message.startswith(site + " ("), message)
+            self.assertIn(APP_NAME, message[len(site):])
+        self.assertNotIn("x1", server.whisper("Carol", "Rhino Prime Set", 80))
+        self.assertIn("x3", server.whisper("Carol", "Rhino Prime Set", 80, 3)[len(site):])
 
 
 class History(unittest.TestCase):
