@@ -138,6 +138,7 @@ def main() -> int:
     threading.Thread(target=httpd.serve_forever, name="http", daemon=True).start()
     threading.Thread(target=state.watch, name="watch", daemon=True).start()
     state.ensure_catalog()
+    state.check_update()             # one question to the page of the project, unless switched off in the settings
 
     if args.no_window:
         if sys.stdout is not None:

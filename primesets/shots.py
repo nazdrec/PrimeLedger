@@ -217,13 +217,19 @@ def game_new() -> Dict[str, Any]:
     return {"dir": str(folder), "exists": folder.is_dir(), "files": files, "since": since}
 
 
-def game_import() -> List[Path]:
-    """Copy the new game screenshots into the inbox (in the order they were taken) and remember where we stopped."""
+def game_import(only: Optional[List[Path]] = None) -> List[Path]:
+    """Copy the new game screenshots into the inbox (in the order they were taken) and remember where we stopped.
+
+    only -- take just these of the new files (the live check gives the ones that are written to the end).
+    """
     info = game_new()
     config.SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
     copied: List[Path] = []
     newest = info["since"]
+    wanted = None if only is None else {str(f) for f in only}
     for src in info["files"]:
+        if wanted is not None and str(src) not in wanted:
+            continue
         stamp = datetime.fromtimestamp(src.stat().st_mtime).strftime("%Y%m%d-%H%M%S")
         dst = config.SCREENSHOT_DIR / f"game-{stamp}-{src.stem}{src.suffix.lower()}"
         if not dst.exists():
@@ -237,8 +243,9 @@ def game_import() -> List[Path]:
     return copied
 
 
-def game_mark_seen() -> None:
-    """Forget what is in the game's folder right now: only screenshots made later will be offered."""
+def game_mark_seen(moment: Optional[float] = None) -> None:
+    """Forget what is in the game's folder right now (or was there before `moment`): only screenshots
+    made later will be offered."""
     state = _state()
-    state["game_shots_seen"] = time.time()
+    state["game_shots_seen"] = max(float(state.get("game_shots_seen") or 0), moment) if moment else time.time()
     _save_state(state)

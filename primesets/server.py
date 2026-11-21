@@ -19,8 +19,8 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional
 
-from . import (APP_NAME, HOMEPAGE, __version__, analysis, catalog as catalog_mod, config, continuity, history, i18n, inventory, mastery,
-               providers, recognize, settings, shots, vault)
+from . import (APP_NAME, HOMEPAGE, __version__, analysis, catalog as catalog_mod, config, continuity, demo, history, i18n,
+               inventory, live, mastery, providers, recognize, sales, settings, shots, updates, vault)
 from .cache import DiskCache
 from .i18n import N_, tr
 from .wfm import FetchError, WfmClient, valid_slug
@@ -58,9 +58,33 @@ class AppState:
         self._thumbs: Dict[Any, bytes] = {}
         self._joins: Dict[str, Any] = {"key": None, "result": None, "busy": None}
         self._joins_lock = threading.Lock()
+        self.live = live.Live(self.push)
+        self.update: Dict[str, Any] = {"state": "off"}
+
+    # -- a newer version ----------------------------------------------------
+    def check_update(self, force: bool = False) -> None:
+        """Ask the page of the project whether a newer version is out -- in the background, and only
+        while the user has not switched the question off."""
+        if not settings.check_updates():
+            self.update = {"state": "off"}
+            return
+
+        def ask() -> None:
+            try:
+                self.update = updates.check(self.cache, force)
+            except Exception:            # a convenience: it must never get in the way
+                log.exception("the check for a newer version failed")
+                return
+            if self.update.get("state") == "newer":
+                log.info("a newer version is out: %s", self.update.get("latest"))
+                self.push("update", {})
+
+        threading.Thread(target=ask, name="update-check", daemon=True).start()
 
     # -- recognition --------------------------------------------------------
     def start_recognition(self) -> recognize.Job:
+        self.live.stop()
+        demo.switch(False)               # the user's own screenshots are being read: the example has done its job
         with self._job_lock:
             if self.job and self.job.state == "running":
                 raise recognize.RecognizeError(tr("Распознавание уже идёт"), "busy")
@@ -135,7 +159,7 @@ class AppState:
         # after the reading the job knows better: it has been told which screenshots are the inventory
         joins = snap["joins"] if snap and snap.get("joins") else self.joins_state()
         return {"provider": providers.current().status(force=refresh), "job": snap,
-                "files": list_screenshots(), "joins": joins,
+                "files": list_screenshots(), "joins": joins, "live": self.live.state(),
                 "game": {"dir": game["dir"], "exists": game["exists"], "new": len(game["files"])}}
 
     # -- server-sent events -------------------------------------------------
@@ -378,16 +402,135 @@ def ducat_sets(state: AppState) -> Dict[str, Any]:
     return {"sets": out, "ttl_orders": config.TTL_TOP_ORDERS, "min_interval": config.WFM_MIN_INTERVAL}
 
 
-def whisper(user: str, item_en: str, platinum: Any, count: int = 1) -> str:
-    """The message for a seller: the buyer pastes it into the game chat by hand.
+def whisper(user: str, item_en: str, platinum: Any, count: int = 1, deal: str = "buy") -> str:
+    """The message for a seller (deal="buy") or for a buyer (deal="sell"): the user pastes it into the
+    game chat by hand.
 
     warframe.market's API rules ask an application to give this message in the same format as the
     site and to include the application's name.  So the site's own line is kept exactly as it is,
-    and what the application adds comes after it: its name and, when several are bought, how many.
+    and what the application adds comes after it: its name and, when several are traded, how many.
     """
-    line = f'/w {user} Hi! I want to buy: "{item_en}" for {platinum} platinum. (warframe.market)'
+    verb = "sell" if deal == "sell" else "buy"
+    line = f'/w {user} Hi! I want to {verb}: "{item_en}" for {platinum} platinum. (warframe.market)'
     own = f"x{count}, via {APP_NAME}" if count > 1 else f"via {APP_NAME}"
     return f"{line} ({own})"
+
+
+def _complete_rows(state: AppState) -> List[Dict[str, Any]]:
+    """The sets the inventory holds in full, each with what the market said about it last (no request is made)."""
+    cat = state.catalog
+    if not cat:
+        return []
+    marks = mastery.load()
+    out = []
+    for row in analysis.split_inventory(cat, inventory.load()["items"])["complete"]:
+        st = cat["sets"][row["slug"]]
+        hit = state.wfm.top_orders_cached(st["slug"])
+        price = analysis.price_from_orders(hit[0]) if hit else None
+        out.append({"slug": st["slug"], "title": st["title"], "name_en": st["en"], "thumb": st["thumb"],
+                    "copies": row["complete"], "price": price["value"] if price else None,
+                    "basis": price["basis"] if price else None, "orders_at": hit[1] if hit else None,
+                    "buyers": analysis.buyers_from_orders(hit[0]) if hit else [],
+                    "unmastered": mastery.masterable(st) and mastery.state_of(marks, st["slug"]) == "none"})
+    return out
+
+
+def sell_now(state: AppState) -> Dict[str, Any]:
+    """Who buys the user's complete sets right now: buyers who are in the game, the most generous first.
+
+    Built from the orders the app already holds (the prices of the complete sets); no request is made.
+    """
+    rows = _complete_rows(state)
+    out = []
+    for r in rows:
+        if not r["buyers"]:
+            continue
+        out.append({**{k: r[k] for k in ("slug", "title", "name_en", "thumb", "copies", "unmastered", "orders_at")},
+                    "sell_min": r["price"],
+                    "buyers": [{**b, "message": whisper(b["user"], r["name_en"], b["platinum"], deal="sell")}
+                               for b in r["buyers"][:3]]})
+    out.sort(key=lambda r: (-r["buyers"][0]["platinum"], r["title"]))
+    known = [r["orders_at"] for r in rows if r["orders_at"]]
+    return {"sets": out, "complete": len(rows), "priced": len(known), "oldest_at": min(known, default=None),
+            "ttl_orders": config.TTL_TOP_ORDERS}
+
+
+def sales_plan(state: AppState, target: int, keep_unmastered: bool = True,
+               exclude: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Which complete sets to sell for `target` platinum: what is bought often first (analysis.plan_sales).
+
+    Prices and the week's deals are the ones the app already holds; no request is made here.
+    keep_unmastered -- leave out the sets that are not mastered yet (they are better built first).
+    """
+    skip = set(exclude or [])
+    items, held, unpriced = [], [], []
+    for r in _complete_rows(state):
+        if r["slug"] in skip:
+            continue
+        if keep_unmastered and r["unmastered"]:
+            held.append(r["title"])
+            continue
+        if r["price"] is None:
+            unpriced.append(r["title"])
+            continue
+        stats = state.wfm.statistics_cached(r["slug"])
+        deals = analysis.recent_deals(stats[0].get("days") or []) if stats else None
+        items.append({**r, "platinum": r["price"], "deals": deals, "speed": analysis.sale_speed(deals)})
+    plan = analysis.plan_sales(items, target)
+    steps = []
+    for pick in plan["picks"]:
+        it, n = items[pick["index"]], pick["count"]
+        best = it["buyers"][0] if it["buyers"] else None
+        steps.append({"slug": it["slug"], "title": it["title"], "name_en": it["name_en"], "thumb": it["thumb"],
+                      "count": n, "copies": it["copies"], "platinum": it["platinum"], "sum": it["platinum"] * n,
+                      "deals": it["deals"], "speed": it["speed"], "basis": it["basis"], "orders_at": it["orders_at"],
+                      "buyer": {"user": best["user"], "platinum": best["platinum"]} if best else None})
+    order = {"fast": 0, "normal": 1, "slow": 2}
+    steps.sort(key=lambda s: (order[s["speed"]], -s["platinum"], s["title"]))
+    return {"target": target, "platinum": plan["platinum"], "reached": plan["reached"], "steps": steps,
+            "available": len(items), "held": held, "unpriced": unpriced,
+            "oldest_at": min((s["orders_at"] for s in steps if s["orders_at"]), default=None),
+            "ttl_orders": config.TTL_TOP_ORDERS}
+
+
+def baro(state: AppState) -> Dict[str, Any]:
+    """The parts that make up no full set, each with its ducats and the price the market named last:
+    what is better handed in at the ducat kiosk and what is better sold.  No request is made here --
+    the page asks for the prices set by set (/api/parts-market?scope=spare) when the user says so."""
+    cat = state.catalog
+    out: List[Dict[str, Any]] = []
+    if cat:
+        index = {p["slug"]: (st, p) for st in cat["sets"].values() for p in st["parts"]}
+        for spare in analysis.spare_parts(cat, inventory.load()["items"]):
+            st, p = index[spare["slug"]]
+            hit = state.wfm.top_orders_cached(p["slug"])
+            price = analysis.price_from_orders(hit[0]) if hit else None
+            out.append({"slug": p["slug"], "label": p["label"], "name": p["name"], "thumb": p["thumb"],
+                        "set": st["slug"], "set_title": st["title"], "count": spare["count"], "near": spare["near"],
+                        "ducats": int(p.get("ducats") or 0),
+                        "price": price["value"] if price else None, "basis": price["basis"] if price else None,
+                        "asked": hit is not None, "orders_at": hit[1] if hit else None})
+    out.sort(key=lambda r: (r["set_title"].lower(), r["label"]))
+    return {"parts": out, "ttl_orders": config.TTL_TOP_ORDERS, "min_interval": config.WFM_MIN_INTERVAL}
+
+
+def collection(state: AppState) -> Dict[str, Any]:
+    """Every set of the catalog with what the user has of it and whether it is mastered."""
+    cat = state.catalog
+    out: List[Dict[str, Any]] = []
+    if cat:
+        have = inventory.load()["items"]
+        marks = mastery.load()
+        for st in cat["sets"].values():
+            prog = analysis.set_progress(st, have)
+            out.append({"slug": st["slug"], "title": st["title"], "title_en": st["title_en"], "thumb": st["thumb"],
+                        "category": st["category"], "complete": prog["complete"],
+                        "have": sum(min(p["owned"], p["quantity"]) for p in prog["parts"]),
+                        "need": sum(p["quantity"] for p in prog["parts"]),
+                        "mastery": _mastery_payload(st, marks), "vault": _vault_payload(st),
+                        "market_url": market_url(st["slug"])})
+        out.sort(key=lambda r: r["title"].lower())
+    return {"sets": out}
 
 
 def ducat_plan(state: AppState, target: int, exclude: Optional[List[str]] = None) -> Dict[str, Any]:
@@ -449,6 +592,9 @@ def overview(state: AppState) -> Dict[str, Any]:
                    "ttl_stats": config.TTL_STATISTICS, "trend_window": config.TREND_WINDOW_DAYS,
                    "trend_threshold": config.TREND_THRESHOLD},
         "requests": state.wfm.counters(),
+        "update": state.update,
+        "demo": demo.on(),
+        "welcomed": settings.welcomed(),
     }
     if cat:
         marks = mastery.load()
@@ -493,6 +639,7 @@ def parts_market(state: AppState, slug: str, force: bool, scope: str = "all") ->
     scope="all":     every part; `total` is the price of one set bought part by part.
     scope="missing": only the parts the inventory lacks for the next full copy;
                      `total` is what it costs to buy exactly those.
+    scope="spare":   only the parts left over beyond the full copies; `total` is what they sell for.
     """
     cat = state.catalog
     if not cat or slug not in cat["sets"]:
@@ -500,13 +647,14 @@ def parts_market(state: AppState, slug: str, force: bool, scope: str = "all") ->
     st = cat["sets"][slug]
     progress = analysis.set_progress(st, inventory.load()["items"])
     lacking = {m["slug"]: m["count"] for m in progress["missing"]}
+    spare = {m["slug"]: m["count"] for m in progress["spare"]}
     parts = []
     total: Optional[float] = 0
     errors = []
     for p in st["parts"]:
-        if scope == "missing" and p["slug"] not in lacking:
+        if (scope == "missing" and p["slug"] not in lacking) or (scope == "spare" and p["slug"] not in spare):
             continue
-        units = lacking[p["slug"]] if scope == "missing" else p["quantity"]
+        units = lacking[p["slug"]] if scope == "missing" else spare[p["slug"]] if scope == "spare" else p["quantity"]
         row = {"slug": p["slug"], "units": units, "price": None, "basis": None}
         try:
             top, _ = state.wfm.top_orders(p["slug"], force=force)
@@ -562,6 +710,7 @@ def settings_payload(force: bool = False) -> Dict[str, Any]:
         "provider": conf["provider"],
         "providers": [st for st in states if st],
         "parallel": conf["parallel"],
+        "check_updates": conf["check_updates"],
         "proxy": {"set": bool(vault.proxy()), "hint": vault.proxy_hint()},
         "vault": vault.available(),
         "data_dir": str(config.DATA_DIR), "version": __version__, "frozen": config.FROZEN, "portable": config.PORTABLE,
@@ -591,6 +740,9 @@ def change_settings(state: AppState, payload: Dict[str, Any]) -> Dict[str, Any]:
         patch["provider"] = payload["provider"]
     if "parallel" in payload:
         patch["parallel"] = payload["parallel"]
+    for key in ("check_updates", "welcomed"):
+        if key in payload:
+            patch[key] = bool(payload[key])
     for key in ("models", "use_proxy"):
         if isinstance(payload.get(key), dict):
             patch[key] = payload[key]
@@ -604,6 +756,8 @@ def change_settings(state: AppState, payload: Dict[str, Any]) -> Dict[str, Any]:
     after = (settings.language(), settings.game_language())
     if after != before:
         state.apply_language()
+    if "check_updates" in patch:
+        state.check_update()             # switched on: ask now; switched off: forget the answer
     out = settings_payload()
     out["reload"] = after[0] != before[0]          # the page reloads itself to show the other language
     return out
@@ -710,9 +864,23 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/ducats":
                 st.ensure_catalog()
                 return self._json(ducat_sets(st))
+            if path == "/api/sell-now":
+                return self._json(sell_now(st))
+            if path == "/api/sales":
+                return self._json(sales.payload(st.catalog))
+            if path == "/api/baro":
+                st.ensure_catalog()
+                return self._json(baro(st))
+            if path == "/api/collection":
+                st.ensure_catalog()
+                return self._json(collection(st))
+            if path == "/api/tile":
+                return self._tile((q.get("name") or [""])[0], (q.get("row") or [""])[0], (q.get("col") or [""])[0])
             if path == "/api/history":
-                updates = history.updates(st.catalog, inventory.load()) if st.catalog else []
-                return self._json({"updates": updates, "values": history.values()})
+                if demo.on():            # the example has no past, and the user's own is not mixed into it
+                    return self._json({"updates": [], "values": [], "sales": {"sales": [], "totals": sales.totals([])}})
+                changes = history.updates(st.catalog, inventory.load()) if st.catalog else []
+                return self._json({"updates": changes, "values": history.values(), "sales": sales.payload(st.catalog)})
             if path == "/api/screenshots":
                 return self._json({"files": list_screenshots(), "dir": str(config.SCREENSHOT_DIR)})
             if path == "/api/settings":
@@ -787,8 +955,46 @@ class Handler(BaseHTTPRequestHandler):
                 value, sets = float(payload.get("value") or 0), int(payload.get("sets") or 0)
                 if not (0 <= value < 10 ** 8) or not (0 <= sets < 10 ** 4):
                     return self._error(400, "bad value")
+                if demo.on():            # what the made-up inventory is worth is nobody's history
+                    return self._json({"ok": True, "today": None, "values": []})
                 rec = history.record_value(value, sets, int(payload.get("copies") or 0), int(payload.get("priced") or 0))
                 return self._json({"ok": True, "today": rec, "values": history.values()})
+            if path in ("/api/sales/add", "/api/sales/undo"):
+                if not st.catalog:
+                    return self._error(409, tr("Справочник комплектов ещё не загружен"))
+                if path == "/api/sales/add":
+                    sales.add(st.catalog, str(payload.get("slug") or ""), payload.get("platinum"),
+                              payload.get("count") or 1, str(payload.get("buyer") or ""))
+                else:
+                    sales.undo(st.catalog, str(payload.get("id") or ""))
+                st._inv_mtime = inventory.mtime()
+                return self._json({"overview": overview(st), "sales": sales.payload(st.catalog)})
+            if path == "/api/sales/plan":
+                if not st.catalog:
+                    return self._error(409, tr("Справочник комплектов ещё не загружен"))
+                target = int(payload.get("target") or 0)
+                if not 1 <= target <= 1000000:
+                    return self._error(400, tr("Укажите, сколько платины нужно: от 1 до 1 000 000"))
+                raw = payload.get("exclude")
+                exclude = [str(x)[:200] for x in raw][:2000] if isinstance(raw, list) else []
+                return self._json(sales_plan(st, target, payload.get("keep_unmastered") is not False, exclude))
+            if path == "/api/demo":
+                wanted = bool(payload.get("on"))
+                if wanted and not demo.on() and inventory.load()["items"]:
+                    return self._error(409, tr("Пример показывается, только пока своего инвентаря нет"))
+                demo.switch(wanted)
+                return self._json(overview(st))
+            if path == "/api/live":
+                if payload.get("on"):
+                    if st.job and st.job.state == "running":
+                        return self._error(409, tr("Дождитесь конца распознавания"))
+                    if st.job and st.job.state != "running":
+                        st.job.discard()             # new screenshots are coming: the old reading no longer fits
+                        st.job = None
+                    st.live.start(sound=payload.get("sound") is not False)
+                else:
+                    st.live.stop()
+                return self._json(st.recognition_state())
             if path == "/api/ducats/plan":
                 if not st.catalog:
                     return self._error(409, tr("Справочник комплектов ещё не загружен"))
@@ -878,11 +1084,18 @@ class Handler(BaseHTTPRequestHandler):
                 if not st.job:
                     raise recognize.RecognizeError(tr("Нет результата распознавания"), "state")
                 mode = "merge" if payload.get("mode") == "merge" else "replace"
+                demo.switch(False)
                 result = st.job.apply(mode, force=bool(payload.get("force")))
                 st.job = None
                 st._inv_mtime, st._mastery_mtime = inventory.mtime(), mastery.mtime()
                 return self._json({"ok": True, "result": result, "overview": overview(st),
                                    "recognize": st.recognition_state()})
+            elif path == "/api/recognize/fix":
+                if not st.job:
+                    raise recognize.RecognizeError(tr("Нет результата распознавания"), "state")
+                count = payload.get("count")
+                st.job.fix(int(payload.get("entry", -1)), count=int(count) if count is not None else None,
+                           slug=str(payload["slug"]) if payload.get("slug") else None, skip=bool(payload.get("skip")))
             elif path == "/api/screenshots/from-game":
                 if st.job and st.job.state == "running":
                     raise recognize.RecognizeError(tr("Дождитесь конца распознавания"), "busy")
@@ -932,6 +1145,28 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, data, "image/jpeg", {"Cache-Control": "private, max-age=300"})
         ctype = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
         self._send(200, target.read_bytes(), ctype, {"Cache-Control": "private, max-age=300"})
+
+    def _tile(self, name: str, row: str, col: str) -> None:
+        """One tile of an inventory screenshot: the picture a line of the reading came from."""
+        target = shots.find(name)
+        try:
+            place = (int(row), int(col))
+            key = (target.name, target.stat().st_mtime_ns, "tile") + place if target else None
+        except (ValueError, OSError):
+            key = None
+        if key is None:
+            return self._error(404, "no such tile")
+        cache = self.state._thumbs
+        data = cache.get(key)
+        if data is None:
+            data = continuity.tile_picture(target, *place)
+            if data:
+                if len(cache) > 400:
+                    cache.clear()
+                cache[key] = data
+        if not data:
+            return self._error(404, "no such tile")
+        self._send(200, data, "image/jpeg", {"Cache-Control": "private, max-age=300"})
 
     def _upload(self, q: Dict[str, List[str]]) -> None:
         name = os.path.basename((q.get("name") or ["screenshot.png"])[0])

@@ -296,6 +296,12 @@ class WfmClient:
             return {"days": days}
         return self._cached(f"wfm_stats_{slug}", config.TTL_STATISTICS, load, force)
 
+    def statistics_cached(self, slug: str) -> Optional[Tuple[dict, float]]:
+        """What the last statistics() of this item returned and when -- however old, without any request."""
+        if not valid_slug(slug):
+            return None
+        return self.cache.get(f"wfm_stats_{slug}", None)
+
     def thumbnail(self, rel_path: str) -> Optional[Tuple[bytes, str]]:
         """Item picture from the site's static assets, cached forever. Returns (bytes, mime)."""
         if not _THUMB_RE.match(rel_path or "") or ".." in rel_path:

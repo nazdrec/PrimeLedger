@@ -164,13 +164,21 @@ const S = {
   buyQueue: { running: false, done: 0, total: 0, gen: 0 },
   partsQueue: { running: false, done: 0, total: 0, gen: 0 },
 };
+const TABS = ["complete", "partial", "parts", "ducats", "collection"];
 try {
   const saved = localStorage.getItem("primesets-tab");
-  if (saved === "complete" || saved === "partial" || saved === "parts" || saved === "ducats") S.tab = saved;
+  if (TABS.includes(saved)) S.tab = saved;
 } catch (e) { /* storage unavailable */ }
 // the address may name a tab or the settings: .../#ducats, .../#settings
 const startAt = location.hash.slice(1);
-if (startAt === "complete" || startAt === "partial" || startAt === "parts" || startAt === "ducats") S.tab = startAt;
+if (TABS.includes(startAt)) S.tab = startAt;
+// a number the user typed last time (a target, a threshold), kept between starts
+function remembered(key, fallback) {
+  try { const v = Number(localStorage.getItem(key)); return Number.isFinite(v) && v > 0 ? v : fallback; } catch (e) { return fallback; }
+}
+function remember(key, value) {
+  try { localStorage.setItem(key, String(value)); } catch (e) { /* ignore */ }
+}
 
 // ----------------------------------------------------------------- small UI pieces
 function thumb(rel, small) {
@@ -596,7 +604,9 @@ function detail(set, scope) {
       onclick: () => {
         if (setPriceOf(set.slug) == null) { toast(t("Цена ещё не загружена или комплект сейчас никто не продаёт")); return; }
         copyText(listingText([set]), t("Объявление скопировано — вставьте его в чат игры"));
-      } }, icon("copy"), t("Скопировать объявление")) : null));
+      } }, icon("copy"), t("Скопировать объявление")) : null,
+    scope === "all" && set.complete > 0 ? h("button", { class: "btn subtle", title: t("Комплект продан: убрать его части из инвентаря и записать сделку в журнал"),
+      onclick: () => openSellDialog(set, { price: setPriceOf(set.slug) }) }, icon("check"), t("Продал…")) : null));
   return h("div", { class: "detail" }, left, h("div", null, chartPanel(set)));
 }
 
@@ -751,7 +761,9 @@ function emptyState(title, text, withButton) {
   const art = h("div", { class: "empty-art" });
   art.innerHTML = '<svg viewBox="0 0 24 24"><path d="M12 2.5 20.5 12 12 21.5 3.5 12Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 7.5 16 12l-4 4.5L8 12Z" fill="currentColor"/></svg>';
   return h("div", { class: "card empty" + (withButton ? "" : " small") }, withButton ? art : null, h("h2", null, title), h("p", null, text),
-    withButton ? h("button", { class: "btn primary", onclick: openUpdateDialog }, icon("image"), h("span", null, t("Как добавить инвентарь"))) : null);
+    withButton ? h("div", { class: "empty-actions" },
+      h("button", { class: "btn primary", onclick: openUpdateDialog }, icon("image"), h("span", null, t("Как добавить инвентарь"))),
+      h("button", { class: "btn ghost", title: t("Показать программу на выдуманном инвентаре"), onclick: () => setDemo(true) }, h("span", null, t("Посмотреть на примере")))) : null);
 }
 function viewComplete() {
   const d = S.data;
@@ -775,6 +787,10 @@ function viewComplete() {
       onclick: () => (pq.running ? stopPartsQueue() : runPartsQueue()) },
       icon(pq.running ? "close" : "refresh"), h("span", null, pq.running ? t("Остановить ({0} из {1})", pq.done, pq.total) : t("Комплектом или по частям?"))),
     h("button", { class: "btn ghost", onclick: openListingDialog }, icon("copy"), h("span", null, t("Объявление для чата"))),
+    h("button", { class: "btn ghost", title: t("Игроки, которые прямо сейчас в игре и покупают ваши комплекты"), onclick: openSellNowDialog },
+      icon("up"), h("span", null, t("Покупатели сейчас"))),
+    h("button", { class: "btn ghost", title: t("Подобрать, что продать, чтобы получить нужное число платины"), onclick: openGoalDialog },
+      icon("flat"), h("span", null, t("Цель по платине"))),
     h("span", { class: "sub" }, t("Сравнение запрашивает цены частей: по одному запросу, не чаще двух в секунду.")));
   return h("div", null, tools, card);
 }
@@ -877,6 +893,84 @@ async function setCount(slug, count) {
     render();
     queueMarket(false);
   } catch (err) { toast(err.message); }
+}
+
+// ----------------------------------------------------------------- collection: every prime set, what is owned and what is mastered
+const C = { data: null, stale: true, loading: false, error: "", show: "all", category: "all" };
+async function loadCollection() {
+  if (C.loading) return;
+  C.loading = true;
+  try { C.data = (await api("/api/collection")).sets; C.stale = false; C.error = ""; }
+  catch (err) { C.error = err.message; }
+  C.loading = false;
+  if (S.tab === "collection") renderView();
+}
+const C_SHOW = [
+  ["all", t("Все")],
+  ["todo", t("Не освоено")],
+  ["mastered", t("Освоено")],
+  ["complete", t("Есть комплект")],
+  ["started", t("Начато")],
+  ["empty", t("Нет частей")],
+];
+function collectionMatch(s) {
+  if (C.category !== "all" && s.category !== C.category) return false;
+  const m = s.mastery.state;
+  if (C.show === "todo" && (m === "mastered" || m === "na")) return false;
+  if (C.show === "mastered" && m !== "mastered") return false;
+  if (C.show === "complete" && !s.complete) return false;
+  if (C.show === "started" && (s.complete || !s.have)) return false;
+  if (C.show === "empty" && s.have) return false;
+  const q = fold(S.query.trim());
+  if (!q) return true;
+  const hay = fold([s.title, s.title_en, CATEGORY[s.category] || ""].join(" "));
+  return q.split(/\s+/).every((w) => hay.includes(w));
+}
+function collectionTile(s) {
+  const m = s.mastery;
+  let stock;
+  if (s.complete) stock = h("span", { class: "chip good" }, icon("check"), s.complete > 1 ? t("комплект ×{0}", s.complete) : t("комплект собран"));
+  else if (s.have) {
+    stock = h("div", { class: "meter", title: t("Собрано {0} из {1} частей", s.have, s.need) },
+      h("div", { class: "meter-track" }, h("div", { class: "meter-fill", style: `width:${Math.round(s.have / s.need * 100)}%` })),
+      h("span", { class: "meter-text num" }, t("{0} из {1}", s.have, s.need)));
+  } else stock = h("span", { class: "sub" }, t("частей нет"));
+  return h("div", { class: "col-tile" + (m.state === "mastered" ? " mastered" : "") + (s.complete ? " complete" : s.have ? "" : " none") },
+    h("a", { class: "col-pic", href: s.market_url, target: "_blank", rel: "noopener", title: t("Открыть на warframe.market") }, thumb(s.thumb)),
+    h("div", { class: "col-name", title: s.title_en }, s.title),
+    h("div", { class: "col-meta" }, masteryChip(s) || h("span", { class: "chip quiet" }, m.label)),
+    h("div", { class: "col-stock" }, stock));
+}
+function viewCollection() {
+  if (C.stale && !C.loading) loadCollection();
+  if (!C.data) {
+    return C.error ? h("div", { class: "card empty small" }, h("h2", null, t("Не удалось загрузить список комплектов")), h("p", null, C.error),
+      h("button", { class: "btn subtle", onclick: () => { C.error = ""; C.stale = true; renderView(); } }, t("Повторить")))
+      : h("div", { class: "card" }, h("div", { class: "empty small" }, h("span", { class: "skeleton", style: "width:60%;height:18px" })));
+  }
+  const all = C.data;
+  const can = all.filter((s) => s.mastery.state !== "na");
+  const mastered = can.filter((s) => s.mastery.state === "mastered").length;
+  const unknown = can.filter((s) => s.mastery.state === "unknown").length;
+  const complete = all.filter((s) => s.complete).length, started = all.filter((s) => !s.complete && s.have).length;
+  const bar = (label, value, total, note) => h("div", { class: "col-bar" },
+    h("div", { class: "col-bar-head" }, h("span", null, label), h("b", { class: "num" }, t("{0} из {1}", value, total))),
+    h("div", { class: "bar-track" }, h("div", { class: "bar-fill", style: `width:${total ? Math.round(value / total * 100) : 0}%` })),
+    h("div", { class: "sub" }, note || " "));
+  const list = all.filter(collectionMatch);
+  const cats = Object.keys(CATEGORY).filter((c) => all.some((s) => s.category === c));
+  const tools = h("div", { class: "inv-tools" },
+    h("div", { class: "seg" }, C_SHOW.map(([value, label]) => h("button", { "aria-pressed": String(C.show === value), onclick: () => { C.show = value; renderView(); } }, label))),
+    h("select", { class: "select", "aria-label": t("Вид предметов"), onchange: (e) => { C.category = e.target.value; renderView(); } },
+      h("option", { value: "all", selected: C.category === "all" }, t("Все виды")),
+      cats.map((c) => h("option", { value: c, selected: C.category === c }, CATEGORY[c]))),
+    h("span", { class: "sub" }, tn("показан # комплект|показано # комплекта|показано # комплектов", list.length)));
+  return h("div", null,
+    h("div", { class: "card col-summary" },
+      bar(t("Освоено"), mastered, can.length, unknown ? t("ещё не отмечено: {0} — щёлкните по метке у предмета", unknown) : ""),
+      bar(t("Собрано комплектов"), complete, all.length, started ? t("начато, но не собрано: {0}", started) : "")),
+    tools,
+    list.length ? h("div", { class: "col-grid" }, list.map(collectionTile)) : h("div", { class: "card empty small" }, h("p", null, t("Под этот фильтр ничего не подходит."))));
 }
 
 
@@ -1043,6 +1137,8 @@ function ducatTools() {
   return h("div", { class: "inv-tools", id: "ducat-tools" },
     h("button", { class: "btn " + (asked.length || q.running ? "ghost" : "primary"), onclick: () => (q.running ? stopDucatQueue() : runDucatQueue(false)) },
       icon(q.running ? "close" : "refresh"), h("span", null, label)),
+    h("button", { class: "btn ghost", title: t("Ваши лишние части: какие выгоднее сдать на дукаты, а какие продать за платину"), onclick: openBaroDialog },
+      icon("cube"), h("span", null, t("Что сдать Баро"))),
     h("span", { class: "sub" }, status));
 }
 function updateDucatTools() {
@@ -1250,9 +1346,127 @@ function calcCard() {
 
 
 
+// ----------------------------------------------------------------- ducats: what to hand in to Baro
+/* The other direction: the parts the user already has beyond full sets.  A part that costs next to
+   nothing in platinum is better handed in at the ducat kiosk; a part with a real price is better
+   sold.  The border between the two is the user's: how many ducats one platinum should bring. */
+const BARO = { data: null, state: "idle", error: "", rate: remembered("primesets-baro-rate", 10), hold: true,
+  queue: { running: false, done: 0, total: 0, gen: 0 } };
+async function loadBaro() {
+  try { BARO.data = await api("/api/baro"); BARO.state = "done"; BARO.error = ""; }
+  catch (err) { BARO.state = "error"; BARO.error = err.message; }
+  renderBaro();
+}
+function stopBaroQueue() { BARO.queue.gen++; BARO.queue.running = false; loadBaro(); }
+async function runBaroQueue(force) {
+  const q = BARO.queue, d = BARO.data;
+  if (!d || q.running) return;
+  const fresh = (p) => p.asked && Date.now() / 1000 - p.orders_at <= d.ttl_orders;
+  const sets = [...new Set(d.parts.filter((p) => force || !fresh(p)).map((p) => p.set))];
+  if (!sets.length) { toast(t("Цены уже загружены.")); return; }
+  const gen = ++q.gen;
+  Object.assign(q, { running: true, done: 0, total: sets.length });
+  renderBaro();
+  for (const slug of sets) {
+    if (gen !== q.gen) return;
+    try { await api(`/api/parts-market?slug=${slug}&scope=spare${force ? "&force=1" : ""}`); } catch (e) { /* that set stays without a price */ }
+    q.done++;
+    if (gen !== q.gen) return;
+    try { BARO.data = await api("/api/baro"); } catch (e) { /* the list is shown anew at the end */ }
+    if (gen === q.gen) renderBaro();          // the parts fall into their groups as their prices come in
+  }
+  if (gen !== q.gen) return;
+  q.running = false;
+  loadBaro();
+}
+// where a spare part belongs: "hold" | "ducats" | "sell" | "unknown" (no price asked yet)
+function baroGroup(p) {
+  if (BARO.hold && p.near) return "hold";
+  if (!p.asked || (p.price == null && !p.ducats)) return "unknown";
+  if (p.price == null || !p.ducats) return p.ducats ? "ducats" : "sell";
+  return p.ducats / p.price >= BARO.rate ? "ducats" : "sell";
+}
+function baroRow(p, group) {
+  const worth = p.price != null ? t("на маркете {0} пл", fmt(p.price)) + (p.basis === "online" ? " · " + t("продавец не в игре") : "") : p.asked ? t("на маркете не продают") : "";
+  return h("div", { class: "calc-step" },
+    thumb(p.thumb, true),
+    h("div", { class: "calc-what" },
+      h("div", { class: "part-name", title: p.name }, p.set_title + ": " + p.label + (p.count > 1 ? ` ×${p.count}` : "")),
+      h("div", { class: "part-meta" }, group === "sell" ? t("в киоске {0} дук.", fmt(p.ducats))
+        : [t("{0} дук. за штуку", fmt(p.ducats)), worth].filter(Boolean).join(" · "))),
+    h("div", { class: "calc-num num" }, group === "sell"
+      ? [h("b", null, pl(p.price * p.count)), p.count > 1 ? h("div", { class: "sub" }, t("по {0} пл", fmt(p.price))) : null]
+      : h("b", null, t("{0} дук.", fmt(p.ducats * p.count)))),
+    h("span"));
+}
+function renderBaro() {
+  const dlg = $("#dlg-baro");
+  if (!dlg.open) return;
+  const body = h("div", { class: "dlg-body" });
+  const d = BARO.data, q = BARO.queue;
+  if (BARO.state === "error") body.append(h("div", { class: "callout" }, icon("alert"), h("div", null, BARO.error)));
+  else if (!d) body.append(h("span", { class: "skeleton", style: "width:100%;height:160px" }));
+  else if (!d.parts.length) {
+    body.append(h("div", { class: "empty small" }, h("p", null, t("Лишних частей нет: всё, что у вас есть, складывается в полные комплекты."))));
+  } else {
+    const groups = { ducats: [], sell: [], hold: [], unknown: [] };
+    for (const p of d.parts) groups[baroGroup(p)].push(p);
+    groups.ducats.sort((a, b) => b.ducats * b.count - a.ducats * a.count);
+    groups.sell.sort((a, b) => b.price * b.count - a.price * a.count);
+    const kinds = new Set(d.parts.map((p) => p.slug)).size;
+    const asked = d.parts.filter((p) => p.asked).length;
+    const oldest = d.parts.reduce((a, p) => (p.orders_at ? Math.min(a, p.orders_at) : a), Infinity);
+    const rate = h("input", { class: "num-input num", type: "number", min: "1", max: "100", step: "1", value: String(BARO.rate), "aria-label": t("Сколько дукатов должна приносить одна платина"),
+      onchange: (e) => { BARO.rate = Math.min(100, Math.max(1, Math.round(Number(e.target.value) || 10))); remember("primesets-baro-rate", BARO.rate); renderBaro(); } });
+    body.append(
+      h("div", { class: "calc-head" },
+        h("div", { class: "calc-title" }, h("div", { class: "sub" },
+          t("Части сверх полных комплектов. Если за одну платину цены часть даёт в киоске не меньше указанного числа дукатов, её выгоднее сдать Баро, иначе — продать."))),
+        h("div", { class: "calc-form" },
+          h("label", { class: "calc-field" }, h("span", { class: "sub" }, t("Дукатов за 1 пл, не меньше")), rate))),
+      h("div", { class: "dlg-tools" },
+        h("button", { class: "btn " + (asked === d.parts.length || q.running ? "ghost" : "primary"), id: "baro-ask", onclick: () => (q.running ? stopBaroQueue() : runBaroQueue(asked === d.parts.length)) },
+          icon(q.running ? "close" : "refresh"), h("span", null, q.running ? t("Остановить ({0} из {1})", q.done, q.total) : asked === d.parts.length ? t("Обновить цены") : t("Узнать цены частей"))),
+        h("span", { class: "sub" }, q.running ? t("Запрашиваю цены: по одному запросу, не чаще двух в секунду.")
+          : !asked ? t("Цены частей ещё не запрашивались. Запросов к warframe.market: {0} — около {1} мин.", kinds, Math.max(1, Math.round(kinds * d.min_interval / 60)))
+            : Number.isFinite(oldest) ? t("Цены известны для {0} из {1} · самые старые от {2}.", asked, d.parts.length, stampFmt.format(new Date(oldest * 1000)))
+              : t("Цены известны для {0} из {1}.", asked, d.parts.length))),
+      h("label", { class: "check-line" },
+        h("input", { type: "checkbox", checked: BARO.hold, onchange: (e) => { BARO.hold = e.target.checked; renderBaro(); } }),
+        h("span", null, t("Придержать части комплектов, которым до полного не хватает одной части"))));
+    const section = (title, sum, list, group, empty) => h("section", { class: "baro-sec" },
+      h("div", { class: "baro-head" }, h("h3", null, title), h("span", { class: "num" }, sum)),
+      list.length ? h("div", { class: "calc-list" }, list.map((p) => baroRow(p, group))) : h("div", { class: "sub" }, empty));
+    const count = (list) => list.reduce((a, p) => a + p.count, 0);
+    body.append(
+      section(t("Сдать на дукаты"), groups.ducats.length ? tn("# часть|# части|# частей", count(groups.ducats)) + " · " + tn("# дукат|# дуката|# дукатов", groups.ducats.reduce((a, p) => a + p.ducats * p.count, 0)) : "",
+        groups.ducats, "ducats", asked ? t("Под этот порог ничего не попало.") : t("Появится, когда будут известны цены.")),
+      section(t("Продать за платину"), groups.sell.length ? tn("# часть|# части|# частей", count(groups.sell)) + " · ≈ " + pl(groups.sell.reduce((a, p) => a + p.price * p.count, 0)) : "",
+        groups.sell, "sell", asked ? t("Под этот порог ничего не попало.") : t("Появится, когда будут известны цены.")));
+    if (groups.hold.length) {
+      body.append(section(t("Придержать"), tn("# часть|# части|# частей", count(groups.hold)), groups.hold, "hold", ""));
+    }
+    if (groups.unknown.length) {
+      body.append(h("div", { class: "sub" }, tn("Без цены пока # часть: нажмите «Узнать цены частей».|Без цены пока # части: нажмите «Узнать цены частей».|Без цены пока # частей: нажмите «Узнать цены частей».", count(groups.unknown))));
+    }
+    body.append(h("p", { class: "foot" }, t("Цена части — минимальная у продавцов в игре. Дукаты за часть берутся из данных warframe.market. Части полных комплектов сюда не входят: комплект выгоднее продать целиком.")));
+  }
+  const prev = dlg.querySelector(".dlg-body");
+  const scroll = prev ? prev.scrollTop : 0;
+  dlg.replaceChildren(h("div", { class: "dlg-head" }, h("h2", null, t("Что сдать Баро")), closeButton(dlg)), body);
+  body.scrollTop = scroll;
+}
+function openBaroDialog() {
+  const dlg = $("#dlg-baro");
+  if (!dlg.open) dlg.showModal();
+  renderBaro();
+  loadBaro();
+}
+
 // ----------------------------------------------------------------- history: what changed and what it is worth
 const HIST = { data: null, state: "idle", error: "", open: new Set(), view: "now" };
-const SOURCE_RU = { screenshots: t("по скриншотам"), "screenshots+manual": t("по скриншотам, с правками вручную"), manual: t("правки вручную") };
+const SOURCE_RU = { screenshots: t("по скриншотам"), "screenshots+manual": t("по скриншотам, с правками вручную"), manual: t("правки вручную"),
+  sale: t("продажа") };
 async function loadHistory() {
   try { HIST.data = await api("/api/history"); HIST.state = "done"; }
   catch (err) { HIST.state = "error"; HIST.error = err.message; }
@@ -1410,6 +1624,26 @@ function updateCard(u) {
       list(t("Исчезли"), u.removed, (r) => `${r.item} ×${r.count}`),
       list(t("Изменилось количество"), u.changed, (r) => `${r.item}: ${r.old} → ${r.new}`)) : null);
 }
+// what the user sold ("Продал"): the journal, the newest first; a line entered by mistake is taken back here
+function salesPanel() {
+  const box = HIST.data && HIST.data.sales;
+  if (!box || !box.sales.length) return null;
+  const undo = async (sale) => {
+    try {
+      await afterSale(await post("/api/sales/undo", { id: sale.id }));
+      toast(t("Продажа отменена: части вернулись в инвентарь"));
+    } catch (err) { toast(err.message); }
+  };
+  return h("div", { class: "panel sales-panel" },
+    h("div", { class: "panel-title" }, h("span", null, t("Журнал продаж")),
+      h("span", { class: "num" }, t("за 30 дней: {0} пл · всего: {1} пл", fmt(box.totals.month), fmt(box.totals.platinum)))),
+    h("div", { class: "sales-list" }, box.sales.map((s) => h("div", { class: "sale-row" },
+      thumb(s.thumb, true),
+      h("div", { class: "calc-what" }, h("div", { class: "part-name" }, s.title + (s.count > 1 ? ` ×${s.count}` : "")),
+        h("div", { class: "part-meta" }, [stampFmt.format(new Date(s.at)), s.buyer ? t("покупатель {0}", s.buyer) : null].filter(Boolean).join(" · "))),
+      h("div", { class: "calc-num num" }, h("b", null, pl(s.sum)), s.count > 1 ? h("div", { class: "sub" }, t("по {0} пл", fmt(s.platinum))) : null),
+      h("button", { class: "btn subtle", title: t("Запись сделана по ошибке: вернуть части в инвентарь и убрать её из журнала"), onclick: () => undo(s) }, t("Отменить"))))));
+}
 function renderHistory() {
   const dlg = $("#dlg-history");
   if (!dlg.open) return;
@@ -1418,7 +1652,10 @@ function renderHistory() {
     body.append(h("div", { class: "callout" }, icon("alert"), h("div", null, HIST.error || t("История не загрузилась."))));
   } else {
     const ups = HIST.data.updates;
-    body.append(valuePanel(), h("h3", { class: "hist-title" }, t("Что менялось в инвентаре")),
+    const sold = salesPanel();
+    body.append(valuePanel());
+    if (sold) body.append(sold);
+    body.append(h("h3", { class: "hist-title" }, t("Что менялось в инвентаре")),
       ups.length ? h("div", { class: "hist-list" }, ups.map(updateCard))
         : h("div", { class: "sub" }, t("Пока нет ни одного обновления: история начнётся с первого занесённого инвентаря.")));
   }
@@ -1548,6 +1785,275 @@ function openListingDialog() {
   renderListing();
 }
 
+// ----------------------------------------------------------------- selling: "sold", who buys now, a platinum target
+/* The app cannot see a trade: a sale is what the user tells it.  "Продал" takes the parts of the set
+   out of the inventory and writes the sale into the journal, where it can be taken back. */
+const SELL = { set: null, price: 0, count: 1, buyer: "", busy: false, after: null };
+function closeButton(dlg) {
+  return h("button", { class: "btn ghost icon-only", "aria-label": t("Закрыть"), onclick: () => dlg.close() }, icon("close"));
+}
+function openSellDialog(set, opts) {
+  const o = opts || {};
+  const most = Math.max(1, set.complete || 1);
+  Object.assign(SELL, { set, price: Math.max(0, Math.round(Number(o.price) || 0)), count: Math.min(Math.max(1, o.count || 1), most),
+    buyer: o.buyer || "", busy: false, after: o.after || null });
+  const dlg = $("#dlg-sell");
+  if (!dlg.open) dlg.showModal();
+  renderSell();
+}
+function renderSell() {
+  const dlg = $("#dlg-sell"), set = SELL.set;
+  if (!dlg.open || !set) return;
+  const most = Math.max(1, set.complete || 1);
+  const total = h("b", { class: "num" });
+  const recount = () => { total.textContent = pl(SELL.price * SELL.count); };
+  const price = h("input", { class: "num-input num", type: "number", min: "0", max: "100000", step: "1", value: String(SELL.price), "aria-label": t("Цена за один комплект, платина"),
+    oninput: (e) => { SELL.price = Math.max(0, Math.round(Number(e.target.value) || 0)); recount(); },
+    onkeydown: (e) => { if (e.key === "Enter") { e.preventDefault(); recordSale(); } } });
+  const count = h("input", { class: "num-input num", type: "number", min: "1", max: String(most), step: "1", value: String(SELL.count), disabled: most < 2, "aria-label": t("Сколько комплектов продано"),
+    oninput: (e) => { SELL.count = Math.min(most, Math.max(1, Math.round(Number(e.target.value) || 1))); recount(); } });
+  recount();
+  const notMastered = (set.mastery && set.mastery.warn) || set.unmastered;
+  dlg.replaceChildren(
+    h("div", { class: "dlg-head" }, h("h2", null, t("Продажа")), closeButton(dlg)),
+    h("div", { class: "dlg-body" },
+      h("div", { class: "sell-what" }, thumb(set.thumb), h("div", null, h("b", null, set.title),
+        h("div", { class: "sub" }, SELL.buyer ? t("покупатель {0}", SELL.buyer) : tn("у вас # комплект|у вас # комплекта|у вас # комплектов", most)))),
+      notMastered ? h("div", { class: "callout" }, icon("alert"), h("div", null, t("Этот комплект у вас не освоен: после продажи очки мастерства за него придётся добывать заново."))) : null,
+      h("div", { class: "sell-form" },
+        h("label", { class: "calc-field" }, h("span", { class: "sub" }, t("Цена за комплект, пл")), price),
+        h("label", { class: "calc-field" }, h("span", { class: "sub" }, t("Количество")), count),
+        h("div", { class: "calc-field" }, h("span", { class: "sub" }, t("Итого")), h("div", { class: "sell-total" }, total))),
+      h("p", { class: "sub" }, t("Части комплекта уйдут из инвентаря, а сделка запишется в журнал (кнопка «История»). Запись можно отменить: части вернутся.")),
+      h("div", { class: "actions" },
+        h("button", { class: "btn primary", disabled: SELL.busy, onclick: recordSale }, icon("check"), t("Записать продажу")),
+        h("button", { class: "btn ghost", onclick: () => dlg.close() }, t("Отмена")))));
+  price.focus();
+  price.select();
+}
+async function recordSale() {
+  if (SELL.busy || !SELL.set) return;
+  SELL.busy = true;
+  const sold = { slug: SELL.set.slug, sum: SELL.price * SELL.count, count: SELL.count };
+  try {
+    const res = await post("/api/sales/add", { slug: sold.slug, platinum: SELL.price, count: SELL.count, buyer: SELL.buyer });
+    afterSale(res);
+    $("#dlg-sell").close();
+    toast(t("Продажа записана: +{0} пл", fmt(sold.sum)));
+    if (SELL.after) SELL.after(sold);
+  } catch (err) {
+    toast(err.message);
+  } finally {
+    SELL.busy = false;
+  }
+}
+// the inventory changed through a sale (or its undoing): show it, and do not announce it as news
+function afterSale(res) {
+  S.data = res.overview;
+  S.parts.clear();
+  const alive = new Set([...S.data.complete, ...S.data.partial].map((x) => x.slug));
+  for (const slug of [...S.market.keys()]) if (!alive.has(slug)) S.market.delete(slug);
+  render();
+  queueMarket(false);                 // a set that came back with an undone sale has no price yet
+  return loadHistory().then(() => {
+    const last = HIST.data && HIST.data.updates[0];
+    if (last) historySeen(last.at);
+    renderChangesBanner();
+    if ($("#dlg-history").open) renderHistory();
+  });
+}
+
+/* Who buys the complete sets right now: buy orders of players who are in the game.  The orders came
+   with the prices of the sets, so nothing is asked anew until the user presses "Обновить". */
+const NOW = { data: null, state: "idle", error: "", copied: new Set(), refreshing: false };
+async function loadSellNow() {
+  try { NOW.data = await api("/api/sell-now"); NOW.state = "done"; NOW.error = ""; }
+  catch (err) { NOW.state = "error"; NOW.error = err.message; }
+  renderSellNow();
+}
+async function refreshSellNow() {
+  if (NOW.refreshing) return;
+  NOW.refreshing = true;
+  renderSellNow();
+  await queueMarket(true);
+  NOW.refreshing = false;
+  await loadSellNow();
+}
+function sellNowRow(row) {
+  const b = row.buyers[0];
+  const key = row.slug + "|" + b.user;
+  const copied = NOW.copied.has(key);
+  const set = S.data.complete.find((x) => x.slug === row.slug) || { slug: row.slug, title: row.title, thumb: row.thumb, complete: row.copies, unmastered: row.unmastered };
+  return h("div", { class: "calc-step" },
+    thumb(row.thumb, true),
+    h("div", { class: "calc-what" },
+      h("div", { class: "part-name" }, row.title + (row.copies > 1 ? ` ×${row.copies}` : "")),
+      h("div", { class: "part-meta" }, row.unmastered ? h("span", { class: "chip warn" }, icon("alert"), t("не освоено")) : null,
+        [t("покупатель {0}", b.user),
+          typeof b.reputation === "number" && b.reputation > 0 ? t("репутация {0}", b.reputation) : null,
+          b.quantity > 1 ? t("возьмёт {0} шт.", b.quantity) : null,
+          row.buyers.length > 1 ? t("ещё покупают за {0}", row.buyers.slice(1).map((x) => fmt(x.platinum)).join(", ")) : null].filter(Boolean).join(" · "))),
+    h("div", { class: "calc-num num" },
+      h("b", null, pl(b.platinum)),
+      h("div", { class: "sub" }, row.sell_min == null ? t("никто не продаёт") : row.sell_min > b.platinum ? t("продают от {0} пл", fmt(row.sell_min)) : t("не ниже цены продавцов"))),
+    h("div", { class: "calc-actions" },
+      h("button", { class: "btn subtle", title: b.message,
+        onclick: async () => { await copyText(b.message, t("Сообщение скопировано — вставьте его в чат игры")); NOW.copied.add(key); renderSellNow(); } },
+        icon(copied ? "check" : "copy"), t("Сообщение")),
+      h("button", { class: "btn subtle", title: t("Сделка состоялась: убрать части из инвентаря и записать продажу"),
+        onclick: () => openSellDialog(set, { price: b.platinum, buyer: b.user, after: () => loadSellNow() }) }, t("Продал…"))),
+    copied ? h("input", { class: "msg-line", readonly: true, value: b.message, "aria-label": t("Сообщение покупателю"), onfocus: (e) => e.target.select() }) : null);
+}
+function renderSellNow() {
+  const dlg = $("#dlg-sellnow");
+  if (!dlg.open) return;
+  const body = h("div", { class: "dlg-body" });
+  const d = NOW.data;
+  if (NOW.state === "error") body.append(h("div", { class: "callout" }, icon("alert"), h("div", null, NOW.error)));
+  else if (!d) body.append(h("span", { class: "skeleton", style: "width:100%;height:140px" }));
+  else {
+    const stale = d.oldest_at && Date.now() / 1000 - d.oldest_at > d.ttl_orders;
+    body.append(h("div", { class: "dlg-tools" },
+      h("span", { class: "sub" }, !d.complete ? t("Готовых комплектов пока нет.")
+        : d.priced < d.complete ? t("Заявки известны для {0} из {1} комплектов.", d.priced, d.complete)
+          : t("Заявки покупателей запрошены {0}.", stampFmt.format(new Date(d.oldest_at * 1000)))),
+      d.complete ? h("button", { class: "btn subtle", disabled: NOW.refreshing || S.queue.running, onclick: refreshSellNow },
+        icon("refresh", NOW.refreshing ? "spin" : ""), NOW.refreshing ? t("Запрашиваю…") : t("Обновить")) : null));
+    if (stale && !NOW.refreshing) {
+      body.append(h("div", { class: "callout" }, icon("alert"), h("div", null,
+        t("Этим заявкам больше {0} минут: покупатели могли выйти из игры. Обновите, прежде чем писать.", Math.round(d.ttl_orders / 60)))));
+    }
+    if (d.sets.length) body.append(h("div", { class: "calc-list" }, d.sets.map(sellNowRow)));
+    else if (d.complete) body.append(h("div", { class: "empty small" }, h("p", null, t("Сейчас никто из игроков в игре не покупает ваши комплекты. Загляните позже: заявки меняются каждую минуту."))));
+    body.append(h("p", { class: "foot" }, t("Здесь только покупатели со статусом «в игре»: с ними можно торговать сразу. Сообщение вставьте в чат игры сами — приложение туда ничего не отправляет. Покупатель обычно предлагает меньше, чем просят продавцы: это плата за скорость.")));
+  }
+  const prev = dlg.querySelector(".dlg-body");
+  const scroll = prev ? prev.scrollTop : 0;
+  dlg.replaceChildren(h("div", { class: "dlg-head" }, h("h2", null, t("Покупатели сейчас")), closeButton(dlg)), body);
+  body.scrollTop = scroll;
+}
+function openSellNowDialog() {
+  const dlg = $("#dlg-sellnow");
+  if (!dlg.open) dlg.showModal();
+  renderSellNow();
+  loadSellNow();
+}
+
+/* "I need 500 platinum": the server picks what to sell from the complete sets -- what is bought often
+   first -- out of the prices and the week's deals the app already holds. */
+const GOAL = { target: remembered("primesets-plat-target", 300), keep: true, plan: null, state: "idle", error: "", done: [], exclude: new Set() };
+async function planGoal() {
+  if (!(GOAL.target >= 1)) { toast(t("Укажите, сколько платины нужно.")); return; }
+  const need = GOAL.target - GOAL.done.reduce((a, x) => a + x.sum, 0);
+  if (need <= 0) {
+    GOAL.plan = { steps: [], platinum: 0, reached: true, held: [], unpriced: [], available: 0 };
+    GOAL.state = "idle";
+    renderGoal();
+    return;
+  }
+  GOAL.state = "loading";
+  renderGoal();
+  try {
+    GOAL.plan = await post("/api/sales/plan", { target: need, keep_unmastered: GOAL.keep, exclude: [...GOAL.exclude] });
+    GOAL.state = "idle"; GOAL.error = "";
+  } catch (err) {
+    GOAL.state = "error"; GOAL.error = err.message;
+  }
+  renderGoal();
+}
+const SPEED = { fast: ["good", t("покупают часто")], normal: ["", t("покупают")], slow: ["quiet", t("покупают редко")] };
+function goalStep(step) {
+  const [cls, label] = SPEED[step.speed] || SPEED.slow;
+  const own = S.data.complete.find((x) => x.slug === step.slug);
+  const set = { ...(own || { slug: step.slug, title: step.title, thumb: step.thumb }), complete: Math.max(own ? own.complete : 1, step.count) };
+  return h("div", { class: "calc-step" },
+    thumb(step.thumb, true),
+    h("div", { class: "calc-what" },
+      h("div", { class: "part-name" }, step.title + (step.count > 1 ? ` ×${step.count}` : "")),
+      h("div", { class: "part-meta" }, h("span", { class: "chip " + cls }, label),
+        [step.deals != null ? tn("# сделка за неделю|# сделки за неделю|# сделок за неделю", step.deals) : t("о сделках данных нет"),
+          step.buyer ? t("в игре покупают за {0} пл", fmt(step.buyer.platinum)) : null].filter(Boolean).join(" · "))),
+    h("div", { class: "calc-num num" }, h("b", null, pl(step.sum)), step.count > 1 ? h("div", { class: "sub" }, t("по {0} пл", fmt(step.platinum))) : null),
+    h("div", { class: "calc-actions" },
+      h("button", { class: "btn subtle", title: t("Сделка состоялась: убрать части из инвентаря и записать продажу"),
+        onclick: () => openSellDialog(set, { price: step.platinum, count: step.count,
+          after: (sold) => { GOAL.done.push({ title: step.title, thumb: step.thumb, sum: sold.sum, count: sold.count }); planGoal(); } }) }, t("Продал…")),
+      h("button", { class: "btn subtle", title: t("Не предлагать этот комплект в этом подборе"),
+        onclick: () => { GOAL.exclude.add(step.slug); planGoal(); } }, t("Не этот"))));
+}
+function goalListing() {
+  const steps = GOAL.plan ? GOAL.plan.steps : [];
+  const sets = steps.map((st) => { const own = S.data.complete.find((x) => x.slug === st.slug); return own ? { ...own, complete: st.count } : null; })
+    .filter((s) => s && setPriceOf(s.slug) != null);
+  if (!sets.length) { toast(t("Цены ещё не загружены или готовых комплектов нет.")); return; }
+  copyText(listingText(sets), t("Объявление скопировано — вставьте его в чат игры"));
+}
+function renderGoal() {
+  const dlg = $("#dlg-goal");
+  if (!dlg.open) return;
+  const p = GOAL.plan;
+  const sold = GOAL.done.reduce((a, x) => a + x.sum, 0);
+  const input = h("input", { class: "num-input num", type: "number", min: "1", max: "1000000", step: "10", value: String(GOAL.target), "aria-label": t("Сколько платины нужно"),
+    oninput: (e) => { GOAL.target = Math.max(0, Math.round(Number(e.target.value) || 0)); remember("primesets-plat-target", GOAL.target); },
+    onkeydown: (e) => { if (e.key === "Enter") { e.preventDefault(); planGoal(); } } });
+  const body = h("div", { class: "dlg-body" },
+    h("div", { class: "calc-head" },
+      h("div", { class: "calc-title" }, h("div", { class: "sub" }, t("Что продать, чтобы получить нужное число платины. Сначала то, что покупают часто: такая сделка состоится сегодня, а не через неделю."))),
+      h("div", { class: "calc-form" },
+        h("label", { class: "calc-field" }, h("span", { class: "sub" }, t("Нужно платины")), input),
+        h("button", { class: "btn primary", disabled: GOAL.state === "loading", onclick: () => planGoal() },
+          GOAL.state === "loading" ? t("Считаю…") : p || GOAL.done.length ? t("Пересчитать") : t("Подобрать")))),
+    h("label", { class: "check-line" },
+      h("input", { type: "checkbox", checked: GOAL.keep, onchange: (e) => { GOAL.keep = e.target.checked; if (p) planGoal(); } }),
+      h("span", null, t("Не трогать неосвоенное: такие комплекты лучше сначала построить"))));
+  if (GOAL.state === "error") body.append(h("div", { class: "callout" }, icon("alert"), h("div", null, GOAL.error)));
+  if (p) {
+    const trades = p.steps.reduce((a, s) => a + s.count, 0);
+    body.append(h("div", { class: "calc-sum" },
+      h("div", { class: "price num" }, fmt(sold + p.platinum), h("span", { class: "unit" }, t("пл"))),
+      h("div", { class: "sub num" }, [tn("# сделка|# сделки|# сделок", trades + GOAL.done.reduce((a, x) => a + x.count, 0)),
+        sold ? t("из них уже продано на {0} пл", fmt(sold)) : null].filter(Boolean).join(" · "))));
+    if (!p.reached) {
+      body.append(h("div", { class: "callout" }, icon("alert"), h("div", null, p.available || GOAL.done.length
+        ? t("На {0} пл готовых комплектов не хватает: по нынешним ценам выходит {1}.", fmt(GOAL.target), fmt(sold + p.platinum))
+        : t("Подбирать не из чего: нет готовых комплектов с известной ценой."))));
+    }
+    if (p.oldest_at && Date.now() / 1000 - p.oldest_at > p.ttl_orders) {
+      body.append(h("div", { class: "callout" }, icon("alert"), h("div", null,
+        h("div", null, t("Цены в этом подборе запрошены {0} и могли измениться.", stampFmt.format(new Date(p.oldest_at * 1000)))),
+        h("div", { class: "actions" }, h("button", { class: "btn subtle", disabled: S.queue.running,
+          onclick: async () => { await queueMarket(true); planGoal(); } }, icon("refresh"), t("Обновить цены и пересчитать"))))));
+    }
+    if (GOAL.done.length) {
+      body.append(h("div", { class: "calc-list done" }, GOAL.done.map((x) => h("div", { class: "calc-step" },
+        thumb(x.thumb, true),
+        h("div", { class: "calc-what" }, h("div", { class: "part-name" }, x.title + (x.count > 1 ? ` ×${x.count}` : "")),
+          h("div", { class: "part-meta" }, icon("check"), t("продано"))),
+        h("div", { class: "calc-num num" }, h("b", null, pl(x.sum))), h("span")))));
+    }
+    if (p.steps.length) body.append(h("div", { class: "calc-list" }, p.steps.map(goalStep)));
+    else if (p.reached && GOAL.done.length) body.append(h("div", { class: "sub ok-line" }, icon("check"), t("Нужная сумма набрана.")));
+    const notes = [];
+    if (p.held && p.held.length) notes.push(t("Не тронуты как неосвоенные: {0}.", p.held.join(", ")));
+    if (p.unpriced && p.unpriced.length) notes.push(t("Сейчас их никто не продаёт, цены нет: {0}.", p.unpriced.join(", ")));
+    if (notes.length) body.append(h("div", { class: "sub" }, notes.join(" ")));
+    body.append(h("div", { class: "calc-foot sub" },
+      h("span", null, t("Цена — минимальная у продавцов в игре; частота — закрытые сделки за последнюю неделю. Число сделок в день в игре ограничено рангом мастерства.")),
+      h("span", { class: "foot-links" },
+        p.steps.length ? h("button", { class: "link-btn", onclick: goalListing }, t("Объявление по этому списку")) : null,
+        GOAL.done.length || GOAL.exclude.size ? h("button", { class: "link-btn", onclick: () => { GOAL.done = []; GOAL.exclude.clear(); planGoal(); } }, t("Начать подбор заново")) : null)));
+  }
+  const prev = dlg.querySelector(".dlg-body");
+  const scroll = prev ? prev.scrollTop : 0;
+  dlg.replaceChildren(h("div", { class: "dlg-head" }, h("h2", null, t("Цель по платине")), closeButton(dlg)), body);
+  body.scrollTop = scroll;
+}
+function openGoalDialog() {
+  const dlg = $("#dlg-goal");
+  if (!dlg.open) dlg.showModal();
+  renderGoal();
+}
+
 // ----------------------------------------------------------------- chrome: tiles, tabs, banners
 function tile(label, value, unit, sub, attention, title) {
   return h("div", { class: "tile" + (attention ? " attention" : ""), title: title || "" },
@@ -1594,6 +2100,7 @@ function renderTabs() {
     ["partial", t("Почти собраны"), d.partial.length],
     ["parts", t("Все части"), d.inventory.distinct],
     ["ducats", t("Дукаты"), D.list ? D.list.length : null],
+    ["collection", t("Коллекция"), null],
   ];
   $("#tabs").replaceChildren(...tabs.map(([id, label, count]) => h("button", {
     class: "tab", role: "tab", "aria-selected": String(S.tab === id),
@@ -1603,14 +2110,53 @@ function renderTabs() {
 function renderStatus() {
   const inv = S.data.inventory;
   let text = t("Инвентарь пока пуст");
-  if (inv.updated_at && inv.distinct) {
+  if (S.data.demo) {
+    text = [t("Пример инвентаря"), tn("# часть|# части|# частей", inv.total)].join(" · ");
+  } else if (inv.updated_at && inv.distinct) {
     const src = { screenshots: t("по скриншотам"), "screenshots+manual": t("по скриншотам, с правками вручную"), manual: t("введён вручную") }[inv.source] || "";
     text = [t("Инвентарь от {0}", stampFmt.format(new Date(inv.updated_at))), src, tn("# часть|# части|# частей", inv.total)].filter(Boolean).join(" · ");
   }
   $("#inv-status").textContent = text;
 }
+async function setDemo(on) {
+  try {
+    S.data = await post("/api/demo", { on });
+    S.parts.clear(); S.market.clear(); S.lite.clear();
+    HIST.data = null;
+    render();
+    queueMarket(false);
+    checkChanges();
+  } catch (err) { toast(err.message); }
+}
 function renderBanners() {
   const d = S.data, cat = d.catalog;
+  // a newer version is out: say so once, with the way to its page; nothing is downloaded by the app itself
+  const ub = $("#update-banner"), up = d.update || {};
+  let skipped = "";
+  try { skipped = localStorage.getItem("primesets-update-skip") || ""; } catch (e) { /* ignore */ }
+  if (up.state === "newer" && up.latest && up.latest !== skipped) {
+    ub.replaceChildren(icon("up"),
+      h("div", { class: "notice-body" },
+        h("div", { class: "notice-title" }, t("Вышла версия {0}", up.latest)),
+        h("div", { class: "notice-text" }, t("У вас версия {0}. Новую можно скачать на странице проекта: достаточно заменить файл программы, данные останутся.", up.current))),
+      up.url ? h("a", { class: "btn primary", href: up.url, target: "_blank", rel: "noopener" }, icon("external"), t("Открыть страницу")) : null,
+      h("button", { class: "btn subtle", onclick: () => { try { localStorage.setItem("primesets-update-skip", up.latest); } catch (e) { /* ignore */ } ub.hidden = true; } }, t("Позже")));
+    ub.hidden = false;
+  } else {
+    ub.hidden = true;
+  }
+  const db = $("#demo-banner");
+  if (d.demo) {
+    db.replaceChildren(icon("info"),
+      h("div", { class: "notice-body" },
+        h("div", { class: "notice-title" }, t("Это пример: выдуманный инвентарь")),
+        h("div", { class: "notice-text" }, t("Цены настоящие, а части придуманы — чтобы посмотреть, как работает программа. Изменить пример нельзя; ваш собственный инвентарь он не затрагивает."))),
+      h("button", { class: "btn primary", onclick: () => { setDemo(false).then(openUpdateDialog); } }, icon("image"), t("Добавить свой инвентарь")),
+      h("button", { class: "btn subtle", onclick: () => setDemo(false) }, t("Убрать пример")));
+    db.hidden = false;
+  } else {
+    db.hidden = true;
+  }
   const cb = $("#catalog-banner");
   if (cat.building) {
     const share = cat.total ? Math.round(cat.done / cat.total * 100) : 0;
@@ -1699,10 +2245,12 @@ function renderView() {
     view.replaceChildren(d.catalog.building ? h("div") : emptyState(t("Справочник ещё не загружен"), t("Проверьте подключение к интернету и нажмите «Повторить» выше."), false));
     return;
   }
-  view.replaceChildren(S.tab === "partial" ? viewPartial() : S.tab === "parts" ? viewParts() : S.tab === "ducats" ? viewDucats() : viewComplete());
+  view.replaceChildren(S.tab === "partial" ? viewPartial() : S.tab === "parts" ? viewParts() : S.tab === "ducats" ? viewDucats()
+    : S.tab === "collection" ? viewCollection() : viewComplete());
 }
 function render() {
   if (!S.data) return;
+  C.stale = true;                     // the inventory or the mastery marks may have changed: the collection is asked for anew
   renderStatus(); renderBanners(); renderTiles(); renderTabs(); renderView(); renderLegend();
   $("#btn-prices").disabled = !S.data.complete.length && S.tab !== "ducats";
 }
@@ -2048,11 +2596,27 @@ function reviewBlock(job) {
       h("div", null, t("Большинство названий не нашлось в каталоге. Если Warframe у вас включена не на том языке, что выбран в настройках, укажите там «Язык игры»: названия сопоставятся заново, перечитывать снимки не придётся.")),
       h("div", { class: "actions" }, h("button", { class: "btn subtle", onclick: () => openSettingsDialog() }, t("Открыть настройки"))))));
   }
+  // A doubtful line is shown with the tile it was read from (when the place of the tile is known) and can
+  // be put right at once: another number, the part it really is, or "leave it out".
+  const fix = (payload) => recognizeAction("/api/recognize/fix", payload);
+  const tilePic = (r) => (r.pos && r.shot ? h("button", { class: "tile-pic", title: t("Плитка, с которой прочитана эта строка. Нажмите, чтобы открыть весь снимок."), onclick: () => zoomShot(r.shot) },
+    h("img", { src: `/api/tile?name=${encodeURIComponent(r.shot)}&row=${r.pos[0]}&col=${r.pos[1]}`, alt: "", loading: "lazy" })) : null);
+  const line = (r, text, note, controls) => h("li", { class: "rev-line" }, tilePic(r),
+    h("div", { class: "rev-text" }, h("div", null, text), note ? h("div", { class: "sub" }, note) : null,
+      controls && controls.length ? h("div", { class: "rev-fix" }, controls) : null));
   if (unmatched.length) box.append(h("div", { class: "review-sec" }, h("b", null, t("Не нашлось в каталоге: {0}", unmatched.length)),
-    h("ul", null, unmatched.map((r) => h("li", null, `${quoted(r.name)} ×${r.count}`,
-      r.suggestions && r.suggestions.length ? h("span", { class: "sub" }, " — " + t("похоже на: {0}", r.suggestions.map((x) => x.item).join("; "))) : null)))));
+    h("ul", { class: "rev-list" }, unmatched.map((r) => line(r, `${quoted(r.name)} ×${r.count}`, r.note || "",
+      r.entry == null ? [] : (r.suggestions || []).map((x) => h("button", { class: "btn subtle", title: t("Занести эту строку как «{0}»", x.item),
+        onclick: () => fix({ entry: r.entry, slug: x.slug }) }, t("Это {0}", x.item))))))));
   if (checks.length) box.append(h("div", { class: "review-sec" }, h("b", null, t("Стоит проверить: {0}", checks.length)),
-    h("ul", null, checks.map((r) => h("li", null, `${quoted(r.name)} → ${r.item || ""} ×${r.count}`, h("span", { class: "sub" }, " — " + (r.note || "")))))));
+    h("ul", { class: "rev-list" }, checks.map((r) => line(r, `${quoted(r.name)} → ${r.item || ""} ×${r.count}`, r.note || "",
+      r.entry == null || r.kind !== "check" ? [] : [
+        h("label", { class: "rev-count" }, h("span", { class: "sub" }, t("Количество")),
+          h("input", { class: "num-input small num", type: "number", min: "1", max: "9999", value: String(r.count), "aria-label": t("Количество"),
+            onchange: (e) => { const n = Math.round(Number(e.target.value)); if (n >= 1) fix({ entry: r.entry, count: n }); } })),
+        h("button", { class: "btn subtle", title: t("Название и количество прочитаны верно: больше не спрашивать об этой строке"),
+          onclick: () => fix({ entry: r.entry, slug: r.slug, count: r.count }) }, icon("check"), t("Верно")),
+        h("button", { class: "btn subtle", title: t("Не заносить эту строку в инвентарь"), onclick: () => fix({ entry: r.entry, skip: true }) }, t("Не заносить"))])))));
   if (marks.length || job.dropped_negative_marks) {
     const by = (state) => marks.filter((m) => m.state === state);
     const notMastered = by("none");
@@ -2086,6 +2650,41 @@ function reviewBlock(job) {
   return box;
 }
 
+/* Shooting with a second pair of eyes (primesets/live.py): while it is on, the app takes every new F6
+   screenshot from the game's folder by itself, checks at once that it continues the previous one and
+   says so with a sound -- the user stays in the game and learns about a skipped row in a second. */
+const LIVE = { sound: true };
+try { LIVE.sound = localStorage.getItem("primesets-live-sound") !== "0"; } catch (e) { /* ignore */ }
+function liveBlock(live, files) {
+  if (!live.on) {
+    return h("div", { class: "live" },
+      h("div", { class: "live-text" }, h("b", null, t("Съёмка с подсказками")),
+        h("div", { class: "sub" }, t("Включите и переходите в игру: после каждого F6 программа сама заберёт снимок и проверит, стыкуется ли он с предыдущим. Короткий сигнал — всё в порядке, три низких — пропущен ряд: вернитесь на один экран и нажмите F6 ещё раз."))),
+      h("div", { class: "live-side" },
+        h("button", { class: "btn primary", onclick: () => recognizeAction("/api/live", { on: true, sound: LIVE.sound }) }, t("Включить подсказки")),
+        h("label", { class: "check-line" },
+          h("input", { type: "checkbox", checked: LIVE.sound, onchange: (e) => { LIVE.sound = e.target.checked; remember("primesets-live-sound", LIVE.sound ? 1 : 0); } }),
+          h("span", null, t("со звуком")))));
+  }
+  let text = t("Жду первый снимок: откройте в игре «Инвентарь → Продать» и нажимайте F6 на каждом экране.");
+  let cls = "";
+  if (live.signal === "gap") {
+    const g = live.gap;
+    const where = g ? t(" Не стыкуются снимки {0} и {1}.", shotNo(shotNumber(files, g.after)), shotNo(shotNumber(files, g.before))) : "";
+    text = t("Пропущен ряд: вернитесь в игре на один экран назад и нажмите F6 ещё раз.") + where;
+    cls = " bad";
+  } else if (live.signal === "end") text = t("Конец списка снят. Можно выключать подсказки и распознавать.");
+  else if (live.signal === "other") text = t("Последний снимок — другой экран, не список частей. Он тоже добавлен.");
+  else if (live.signal === "ok") text = live.gap ? t("Снимок принят, но выше остался разрыв: посмотрите на отмеченные снимки.") : t("Последний снимок стыкуется с предыдущим — листайте дальше.");
+  return h("div", { class: "live on" + cls },
+    h("span", { class: "live-dot", "aria-hidden": "true" }),
+    h("div", { class: "live-text" },
+      h("b", null, live.taken ? tn("Подсказки включены: принят # снимок|Подсказки включены: принято # снимка|Подсказки включены: принято # снимков", live.taken) : t("Подсказки включены")),
+      h("div", { class: "sub" }, text)),
+    h("div", { class: "live-side" },
+      h("button", { class: "btn ghost", onclick: () => recognizeAction("/api/live", { on: false }) }, t("Выключить подсказки"))));
+}
+
 function renderDialog() {
   const dlg = $("#dlg-update");
   if (!dlg.open || !R.state) return;
@@ -2105,8 +2704,11 @@ function renderDialog() {
 
   // the game's own F6 screenshots: picked up from its folder, no pasting needed
   const game = R.state.game || { new: 0, exists: false, dir: "" };
+  const live = R.state.live || { on: false, available: false };
+  const idle = !running && !(job && job.state === "review");
+  const liveBox = idle && live.available ? liveBlock(live, files) : null;
   let fromGame = null;
-  if (!running && !(job && job.state === "review")) {
+  if (idle && !live.on) {
     fromGame = game.new > 0
       ? h("div", { class: "from-game" },
           h("div", null, h("b", null, tn("В папке игры # новый скриншот|В папке игры # новых скриншота|В папке игры # новых скриншотов", game.new)),
@@ -2140,6 +2742,7 @@ function renderDialog() {
         h("li", null, h("div", null,
           h("h3", null, t("Скриншоты из игры")),
           h("p", null, t("Инвентарь → «Продать» → категория «Прайм части» (или поиск «прайм»). Нажимайте F6 на каждом экране и листайте по три ряда: обрезанный нижний ряд должен стать верхним. Курсор держите справа от списка. Кузница нужна только ради отметок «Освоено» — её достаточно снять один раз.")),
+          liveBox,
           fromGame,
           running || (job && job.state === "review") ? null : drop,
           fileGrid(files, running || (job && job.state === "review"), joins),
@@ -2395,6 +2998,10 @@ function renderSettings() {
         h("p", { class: "sub" }, t("Скриншоты отправляются только выбранному сервису распознавания. Ключи и адрес прокси хранятся на этом компьютере, зашифрованные под вашей учётной записью Windows; на страницу и в журнал они не попадают.")),
         field(t("Папка с данными"), h("span", { class: "path" }, d.data_dir),
           h("button", { class: "btn subtle", onclick: () => post("/api/open-folder", { which: "data" }).catch((e) => toast(e.message)) }, icon("folder"), t("Открыть"))),
+        d.homepage ? h("label", { class: "check-line top" },
+          h("input", { type: "checkbox", checked: d.check_updates !== false, disabled: SET.busy, onchange: (e) => saveSettings({ check_updates: e.target.checked }) }),
+          h("span", null, t("Сообщать о новой версии"),
+            h("div", { class: "sub" }, t("При запуске программа один раз спрашивает страницу проекта на GitHub, какая версия последняя. Ничего не скачивается и не устанавливается.")))) : null,
         h("p", { class: "sub" }, t("Версия {0}. Приложение не связано с Digital Extremes и warframe.market и не подключается к игре.", d.version),
           " ", h("a", { class: "link", href: "/licenses", target: "_blank", rel: "noopener" }, t("Лицензии")),
           d.homepage ? " · " : null,
@@ -2424,6 +3031,88 @@ async function openSettingsDialog() {
     renderSettings();
   }
   await loadSettings(false);
+}
+
+// ----------------------------------------------------------------- the first start
+/* Three short steps for someone who sees the program for the first time: the language, who will read
+   the screenshots, how to shoot the inventory -- and a way to look at the program on a made-up
+   inventory before adding one's own. */
+const WELCOME = { step: 0 };
+try { WELCOME.step = Math.min(2, Math.max(0, Number(sessionStorage.getItem("primesets-welcome-step")) || 0)); } catch (e) { /* ignore */ }
+async function finishWelcome(then) {
+  const dlg = $("#dlg-welcome");
+  if (S.data) S.data.welcomed = true;
+  try { sessionStorage.removeItem("primesets-welcome-step"); } catch (e) { /* ignore */ }
+  if (dlg.open) dlg.close();
+  try { await post("/api/settings", { welcomed: true }); } catch (e) { /* the guide will simply come up once more */ }
+  if (typeof then === "function") then();
+}
+function renderWelcome() {
+  const dlg = $("#dlg-welcome");
+  if (!dlg.open) return;
+  const step = WELCOME.step, d = SET.data;
+  const go = (n) => {
+    WELCOME.step = n;
+    try { sessionStorage.setItem("primesets-welcome-step", String(n)); } catch (e) { /* ignore */ }
+    renderWelcome();
+  };
+  let title, content;
+  if (step === 0) {
+    title = t("Добро пожаловать");
+    const setLanguage = async (patch) => {
+      try {
+        const res = await post("/api/settings", patch);
+        if (res.reload) { location.reload(); return; }        // another language: the page is drawn anew, the guide comes back
+        SET.data = res;
+        if ("game_language" in patch) loadOverview();
+      } catch (err) { toast(err.message); }
+      renderWelcome();
+    };
+    content = [
+      h("p", null, t("По скриншотам ваших прайм-частей программа покажет, какие комплекты уже собраны, сколько они стоят на warframe.market и чего не хватает до следующих. К игре она не подключается: работает с картинками, которые вы сделали сами.")),
+      field(t("Язык интерфейса"), h("select", { class: "select", "aria-label": t("Язык интерфейса"), onchange: (e) => setLanguage({ language: e.target.value }) },
+        I18N.languages.map((l) => h("option", { value: l.code, selected: l.code === LANG }, l.name)))),
+      d ? field(t("Язык игры"), h("select", { class: "select", "aria-label": t("Язык игры"), onchange: (e) => setLanguage({ game_language: e.target.value }) },
+        h("option", { value: "", selected: !d.game_language }, t("Как язык интерфейса")),
+        d.languages.map((l) => h("option", { value: l.code, selected: l.code === d.game_language }, l.name))),
+      h("div", { class: "sub field-note" }, t("Язык, на котором включена Warframe: на нём написаны названия на ваших скриншотах."))) : null];
+  } else if (step === 1) {
+    title = t("Кто прочитает скриншоты");
+    const cur = d ? d.providers.find((p) => p.id === d.provider) : null;
+    const meta = cur ? PROVIDER[cur.id] || { title: cur.id } : null;
+    content = [
+      h("p", null, t("Названия и количество со скриншотов читает нейросеть — по вашей подписке (Claude Code, Codex) или по вашему API-ключу (Claude, OpenAI, DeepSeek, Gemini). Подключение настраивается один раз; аккаунт и ключ остаются на этом компьютере.")),
+      !d ? h("span", { class: "skeleton", style: "width:100%;height:40px" })
+        : cur && cur.ready ? h("div", { class: "sub ok-line" }, icon("check"), h("span", null, t("Подключение готово: {0}.", meta.title)))
+          : h("div", { class: "callout" }, icon("alert"), h("div", null, t("Подключение пока не настроено. Это можно сделать сейчас или позже: программа напомнит, когда вы добавите скриншоты."))),
+      h("div", { class: "actions" }, h("button", { class: "btn subtle", onclick: () => openSettingsDialog() }, icon("gear"), t("Настроить подключение")))];
+  } else {
+    title = t("Как снять инвентарь");
+    content = [
+      h("ol", { class: "welcome-list" },
+        h("li", null, t("В игре откройте «Инвентарь» → «Продать» и выберите категорию «Прайм части».")),
+        h("li", null, t("Нажимайте F6 на каждом экране и листайте по три ряда, пока список не кончится.")),
+        h("li", null, t("Здесь нажмите «Обновить инвентарь»: снимки найдутся сами, останется их распознать."))),
+      h("p", { class: "sub" }, t("Там же есть «Съёмка с подсказками»: программа проверяет каждый снимок, пока вы в игре, и звуком говорит, если пропущен ряд.")),
+      h("div", { class: "actions" },
+        h("button", { class: "btn primary", onclick: () => finishWelcome(openUpdateDialog) }, icon("image"), t("Добавить инвентарь")),
+        h("button", { class: "btn ghost", onclick: () => finishWelcome(() => setDemo(true)) }, t("Посмотреть на примере")))];
+  }
+  dlg.replaceChildren(
+    h("div", { class: "dlg-head" }, h("h2", null, title), closeButton(dlg)),
+    h("div", { class: "dlg-body" }, content,
+      h("div", { class: "welcome-foot" },
+        h("span", { class: "welcome-dots", role: "img", "aria-label": t("Шаг {0} из {1}", step + 1, 3) }, [0, 1, 2].map((n) => h("span", { class: n === step ? "on" : "" }))),
+        h("span", { class: "grow" }),
+        step > 0 ? h("button", { class: "btn ghost", onclick: () => go(step - 1) }, t("Назад")) : null,
+        step < 2 ? h("button", { class: "btn primary", onclick: () => go(step + 1) }, t("Далее")) : null)));
+}
+function openWelcome() {
+  const dlg = $("#dlg-welcome");
+  if (dlg.open) return;
+  dlg.showModal();
+  renderWelcome();
+  loadSettings(false).then(renderWelcome);
 }
 
 // ----------------------------------------------------------------- theme
@@ -2465,9 +3154,13 @@ $("#dlg-settings").addEventListener("close", () => {
   clearTimeout(SET.timer);
   if (SET.back) { SET.back = false; openUpdateDialog(); }       // back to the screenshots the settings were opened from
 });
-for (const id of ["#dlg-history", "#dlg-listing"]) {
+for (const id of ["#dlg-history", "#dlg-listing", "#dlg-sellnow", "#dlg-goal", "#dlg-baro", "#dlg-sell"]) {
   $(id).addEventListener("click", (e) => { if (e.target === e.currentTarget) e.currentTarget.close(); });
 }
+$("#dlg-baro").addEventListener("close", () => { if (BARO.queue.running) { BARO.queue.gen++; BARO.queue.running = false; } });
+// the first-start guide closed in any way has been seen; the settings opened from it bring it up to date
+$("#dlg-welcome").addEventListener("close", () => { if (S.data && !S.data.welcomed) finishWelcome(); });
+$("#dlg-settings").addEventListener("close", () => { if ($("#dlg-welcome").open) loadSettings(true).then(renderWelcome); });
 $("#dlg-history").addEventListener("close", renderChangesBanner);
 $("#btn-prices").addEventListener("click", () => {
   if (S.tab === "ducats") { if (!D.queue.running) runDucatQueue(true); return; }
@@ -2509,6 +3202,8 @@ function connectEvents() {
   es.addEventListener("open", () => { lost = 0; $("#offline").hidden = true; });
   es.addEventListener("inventory", () => { S.parts.clear(); loadOverview().then(() => { toast(t("Инвентарь обновлён")); checkChanges(); }); });
   es.addEventListener("joins", () => { if ($("#dlg-update").open) refreshRecognize(false); });
+  es.addEventListener("live", () => { if ($("#dlg-update").open) refreshRecognize(false); });
+  es.addEventListener("update", () => loadOverview());
   es.addEventListener("catalog", (e) => {
     let info = {};
     try { info = JSON.parse(e.data); } catch (err) { /* ignore */ }
@@ -2540,10 +3235,16 @@ async function checkPendingReading() {
   banner.hidden = true;
 }
 
-loadOverview().then(() => { checkPendingReading(); checkChanges(); });
+let reopenSettings = startAt === "settings";
 try {
-  if (sessionStorage.getItem("primesets-open-settings")) { sessionStorage.removeItem("primesets-open-settings"); openSettingsDialog(); }
-  else if (startAt === "settings") openSettingsDialog();
+  if (sessionStorage.getItem("primesets-open-settings")) { sessionStorage.removeItem("primesets-open-settings"); reopenSettings = true; }
 } catch (e) { /* storage unavailable */ }
+loadOverview().then(() => {
+  checkPendingReading();
+  checkChanges();
+  // someone who has neither an inventory nor seen the guide gets the three first-start steps
+  if (S.data && !S.data.welcomed && !S.data.demo && !S.data.inventory.distinct && !reopenSettings) openWelcome();
+});
+if (reopenSettings) openSettingsDialog();
 connectEvents();
 })();

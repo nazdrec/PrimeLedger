@@ -13,9 +13,9 @@ import time
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional
 
-from . import config, history
+from . import config, demo, history
 from .i18n import tr
-from .matching import Matcher, normalize
+from .matching import Match, Matcher, normalize
 
 INVENTORY_VERSION = 1
 IGNORED_FILE = config.DATA_DIR / "ignored_names.json"
@@ -54,6 +54,10 @@ def empty() -> Dict[str, Any]:
 
 
 def load() -> Dict[str, Any]:
+    if demo.on():                       # the made-up list the user asked to look at; the real file is not touched
+        inv = empty()
+        inv.update({"items": dict(demo.ITEMS), "source": "demo", "updated_at": demo.since()})
+        return inv
     with _lock:
         try:
             raw = config.INVENTORY_FILE.read_text(encoding="utf-8")
@@ -110,6 +114,8 @@ def _backup() -> None:
 
 
 def save(inv: Dict[str, Any], source: Optional[str] = None, backup: bool = True) -> Dict[str, Any]:
+    if demo.on():
+        raise ValueError(tr("Сейчас показан пример инвентаря. Уберите пример, чтобы вносить изменения."))
     with _lock:
         if backup:
             _backup()
@@ -133,8 +139,15 @@ def mtime() -> float:
         return 0.0
 
 
+def _not_the_example() -> None:
+    """Nothing is written -- not even into the history -- while the made-up inventory is on show."""
+    if demo.on():
+        raise ValueError(tr("Сейчас показан пример инвентаря. Уберите пример, чтобы вносить изменения."))
+
+
 def set_count(slug: str, count: int, catalog: Dict[str, Any]) -> Dict[str, Any]:
     """Manual edit from the interface: set the number of a part (0 removes it)."""
+    _not_the_example()
     if slug not in catalog["part_index"]:
         raise ValueError(f"unknown part: {slug}")
     count = max(0, min(9999, int(count)))
@@ -154,6 +167,34 @@ def set_count(slug: str, count: int, catalog: Dict[str, Any]) -> Dict[str, Any]:
         return saved
 
 
+def change(delta: Dict[str, int], catalog: Dict[str, Any], kind: str = "manual", note: str = "") -> Dict[str, Any]:
+    """Add (a positive number) or take away (a negative one) several parts at once: a sale the user
+    entered, or its undoing.  All or nothing: if one part cannot be taken in full, nothing is written."""
+    _not_the_example()
+    with _lock:
+        inv = load()
+        wanted = {}
+        for slug, n in delta.items():
+            if slug not in catalog["part_index"]:
+                raise ValueError(f"unknown part: {slug}")
+            left = inv["items"].get(slug, 0) + int(n)
+            if left < 0:
+                raise ValueError(tr("В инвентаре не хватает частей этого комплекта"))
+            wanted[slug] = min(9999, left)
+        _remember(lambda: history.sync(inv))
+        for slug, left in wanted.items():
+            if left:
+                inv["items"][slug] = left
+            else:
+                inv["items"].pop(slug, None)
+        source = inv.get("source") or "manual"
+        if source == "screenshots":
+            source = "screenshots+manual"
+        saved = save(inv, source=source, backup=False)
+        _remember(lambda: history.snapshot(saved["items"], source=kind, note=note))
+        return saved
+
+
 def _remember(action) -> None:
     """The history of updates is a convenience: a failure to write it must never fail the update itself."""
     try:
@@ -164,6 +205,7 @@ def _remember(action) -> None:
 
 
 def dismiss_review(index: int) -> Dict[str, Any]:
+    _not_the_example()
     with _lock:
         inv = load()
         if 0 <= index < len(inv["review"]):
@@ -175,6 +217,7 @@ def dismiss_review(index: int) -> Dict[str, Any]:
 
 def add_review(notes: List[Dict[str, Any]], replace: bool = False) -> Dict[str, Any]:
     """Store notes that need the user's eye (shown as a banner in the interface)."""
+    _not_the_example()
     with _lock:
         inv = load()
         inv["review"] = list(notes) if replace else inv["review"] + list(notes)
@@ -198,6 +241,8 @@ def import_entries(entries: Iterable[Dict[str, Any]], catalog: Dict[str, Any], m
     """
     if mode not in ("replace", "merge"):
         raise ValueError("mode must be 'replace' or 'merge'")
+    if not dry_run:
+        _not_the_example()
     matcher = Matcher(catalog)
     part_names = {p["slug"]: p["name"] for st in catalog["sets"].values() for p in st["parts"]}
 
@@ -209,8 +254,8 @@ def import_entries(entries: Iterable[Dict[str, Any]], catalog: Dict[str, Any], m
     matched: List[dict] = []
     review: List[dict] = []
     skipped: List[dict] = []
-    for raw in entries:
-        if not isinstance(raw, dict):
+    for index, raw in enumerate(entries):
+        if not isinstance(raw, dict) or raw.get("skip") is True:      # skip: the user set the line aside in the review
             continue
         name = str(raw.get("name") or "").strip()
         if not name:
@@ -223,8 +268,14 @@ def import_entries(entries: Iterable[Dict[str, Any]], catalog: Dict[str, Any], m
         bp = raw.get("blueprint")
         bp = bp if isinstance(bp, bool) else None
         shot = str(raw.get("shot") or "")
-        m = matcher.match(name, bp)
-        row = {"name": name, "count": count, "shot": shot, "status": m.status, "note": m.note, "count_known": known}
+        told = raw.get("slug")          # the user named the part in the review: no guessing needed
+        m = Match("exact", slug=told, score=1.0) if isinstance(told, str) and told in part_names else matcher.match(name, bp)
+        row = {"name": name, "count": count, "shot": shot, "status": m.status, "note": m.note, "count_known": known,
+               "entry": index}
+        pos = raw.get("pos")            # the tile of the screenshot the line was read from: [row, column]
+        if isinstance(pos, (list, tuple)) and len(pos) == 2 and all(isinstance(v, int) for v in pos):
+            row["pos"] = [pos[0], pos[1]]
+        where = {"shot": shot, "entry": index, "pos": row.get("pos")}
         if m.ok and count > 0:
             row.update({"slug": m.slug, "item": part_names[m.slug]})
             matched.append(row)
@@ -237,14 +288,14 @@ def import_entries(entries: Iterable[Dict[str, Any]], catalog: Dict[str, Any], m
                     hidden.setdefault(m.slug, row)
             if m.note:                 # a confident match carries no note and needs no second look
                 review.append({"kind": "check", "name": name, "count": count, "slug": m.slug,
-                               "item": part_names[m.slug], "note": m.note, "shot": shot})
+                               "item": part_names[m.slug], "note": m.note, **where})
         elif m.status == "unmatched" and normalize(name) in ignored:
             row["status"] = "ignored"
             skipped.append(row)
         elif m.status == "unmatched":
             sugg = [{"slug": s, "item": part_names[s]} for s in m.suggestions[:3]]
             review.append({"kind": "unmatched", "name": name, "count": count, "note": m.note,
-                           "suggestions": sugg, "shot": shot})
+                           "suggestions": sugg, **where})
             skipped.append(row)
         else:
             row["slug"] = m.slug
@@ -272,7 +323,7 @@ def import_entries(entries: Iterable[Dict[str, Any]], catalog: Dict[str, Any], m
     for slug, row in hidden.items():
         if slug not in exact:
             review.append({"kind": "check", "name": row["name"], "count": at_least[slug], "slug": slug,
-                           "item": part_names[slug], "shot": row["shot"],
+                           "item": part_names[slug], "shot": row["shot"], "entry": row["entry"], "pos": row.get("pos"),
                            "note": tr("верх плитки срезан краем списка, число не видно — проверьте количество")})
 
     with _lock:

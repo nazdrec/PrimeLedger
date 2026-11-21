@@ -12,8 +12,19 @@ sell, with live prices from warframe.market.
 - **Almost complete** — which parts are missing and what they cost.
 - **Ducats** — which sets give the most ducats per platinum, and a purchase calculator that picks
   the cheapest sets from sellers who are in the game right now and writes the message for each of them.
-- **History** — what changed after every update of your inventory, and what your sets are worth over time.
-- **Selling help** — "as a set or as parts?" and a ready listing for the trade chat.
+  And the other way round, "What to trade in to Baro": which of your spare parts are better
+  traded in for ducats and which are better sold.
+- **Selling help** — "as a set or as parts?", a ready listing for the trade chat, buyers who are
+  in the game right now, and a platinum goal: what to sell to get the amount you need.
+- **"Sold"** — one button takes the parts of a sold set out of the inventory and writes the deal
+  into a journal, so the list stays right between two rounds of screenshots.
+- **Collection** — every Prime set at once: what is mastered, what is complete, what is started.
+- **History** — what changed after every update of your inventory, what your sets are worth over
+  time, and what you have earned from sales.
+- **Screenshots with hints** — while you scroll the inventory and press F6, the app picks the
+  screenshots up by itself and tells you with a sound when a row was skipped.
+
+You can look at the app before adding your own inventory: on the first start it offers a made-up example.
 
 Interface languages: English, Русский, Deutsch, Français, Polski, 简体中文.
 
@@ -82,9 +93,17 @@ screenshots either. If something reads wrong, please [open an issue](https://git
    place in the game, press F6 again and add the screenshot — the order does not matter. It also
    warns when the list was not shot from its start or to its end.
 4. Press **Recognize**. Check what was found and press *Add to Inventory*. In the "This is my whole
-   list" mode you see which parts would disappear before anything is written.
+   list" mode you see which parts would disappear before anything is written. A line the app is
+   not sure about is shown with the tile it was read from: the number and the name can be put
+   right on the spot.
+
+**Screenshots with hints.** In the same dialog press *Turn hints on* and switch to the game. After
+every F6 the app picks the screenshot up by itself and checks that it continues the previous one:
+a short sound means all is well, three low ones mean a row was skipped — go one screen back and
+press F6 again. The sound can be switched off.
 
 Any number can be corrected by hand on the *All parts* tab, and a mastery mark by clicking it.
+A sold set is easiest to take off the list with the *Sold…* button in its row.
 
 ## Why this does not break the rules
 
@@ -96,8 +115,13 @@ Any number can be corrected by hand on the *All parts* tab, and a mastery mark b
   and answers are cached. The app places no orders and sends nothing to the game chat: messages
   to sellers are copied by you. A message keeps the site's own format and names the app, as the
   site's API rules ask.
+- "Screenshots with hints" reads only the files the game has already saved to its own screenshot folder.
+  The app does not capture the screen, presses no keys and has no contact with the game.
+- The app cannot see a trade: the journal of sales is what you marked yourself with the "Sold" button.
 - When Claude Code or Codex reads a screenshot it runs in a restricted mode: it can only look at
   the pictures in a temporary folder, cannot run commands and cannot reach other files.
+- On start the app asks the project's page on GitHub once whether a newer version is out (this
+  can be switched off in the settings). It downloads and installs nothing by itself.
 
 Digital Extremes' position on third-party software is that any of it is used at your own risk;
 read it yourself: [Third-Party Software and You](https://support.warframe.com/hc/en-us/articles/360030014351-Third-Party-Software-and-You),

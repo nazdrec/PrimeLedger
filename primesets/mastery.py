@@ -12,7 +12,7 @@ import threading
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional
 
-from . import config
+from . import config, demo
 from .i18n import N_, tr
 from .matching import Matcher
 
@@ -40,6 +40,11 @@ def masterable(st: Dict[str, Any]) -> bool:
 
 def load() -> Dict[str, Any]:
     data: Dict[str, Any] = {"version": VERSION, "updated_at": None, "items": {}}
+    if demo.on():                       # the marks of the made-up inventory; the real file is not touched
+        data["updated_at"] = demo.since()
+        data["items"] = {slug: {"state": state, "source": "demo", "at": demo.since() or ""}
+                         for slug, state in demo.MASTERY.items()}
+        return data
     with _lock:
         try:
             raw = json.loads(MASTERY_FILE.read_text(encoding="utf-8"))
@@ -57,6 +62,8 @@ def load() -> Dict[str, Any]:
 
 
 def _save(data: Dict[str, Any]) -> Dict[str, Any]:
+    if demo.on():
+        raise ValueError(tr("Сейчас показан пример инвентаря. Уберите пример, чтобы вносить изменения."))
     data = dict(data)
     data["version"] = VERSION
     data["updated_at"] = _now_iso()

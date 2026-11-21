@@ -65,9 +65,11 @@ SCHEMA: Dict[str, Any] = {
                     "blueprint_word": {"type": "boolean"},
                     "mastered_label": {"type": ["boolean", "null"]},
                     "owned_label": {"type": ["boolean", "null"]},
+                    "row": {"type": ["integer", "null"]},
+                    "col": {"type": ["integer", "null"]},
                 },
                 "required": ["name", "rank", "count", "count_visible", "cut_top", "blueprint_word",
-                             "mastered_label", "owned_label"],
+                             "mastered_label", "owned_label", "row", "col"],
                 "additionalProperties": False,
             },
         },
@@ -113,6 +115,10 @@ items — по одной записи на каждую плитку или к�
   blueprint_word  true, если подпись начинается словом «Чертёж» (или содержит «Blueprint»); иначе false.
   mastered_label  null.
   owned_label     null.
+  row, col        где плитка стоит на ЦЕЛОМ скриншоте: row — ряд, считая сверху (верхний видимый ряд — 1, даже
+                  если он срезан верхним краем списка); col — место в ряду, считая слева (самая левая плитка
+                  скриншота — 1). Фрагменты перекрываются: считай плитки по всему скриншоту, а не внутри
+                  одного фрагмента. Если не уверен — null. На name и count это не влияет.
   Маленький значок под числом (фигурка с галочкой) количеством не является — не учитывай его.
   Нижний ряд плиток, у которых подписи обрезаны краем экрана, пропусти и в notes о нём не пиши.
 
@@ -130,6 +136,7 @@ items — по одной записи на каждую плитку или к�
                   false — место для меток (левая часть карточки поверх картинки) видно целиком, и метки там нет;
                   null  — это место чем-то закрыто (фигурой персонажа на переднем плане, курсором) или обрезано.
   owned_label     то же самое для метки «N В НАЛИЧИИ».
+  row, col        null.
   Карточку без видимого заголовка пропусти.
 
 ДЛЯ ЛЮБОГО ЭКРАНА:
@@ -179,6 +186,11 @@ corner there may be a number next to a check mark in a circle - that number is t
                   otherwise false.
   mastered_label  null.
   owned_label     null.
+  row, col        where the tile stands on the WHOLE screenshot: row - the row counted from the top (the topmost
+                  visible row is 1, even when the upper edge of the list cuts it); col - the place in the row
+                  counted from the left (the leftmost tile of the screenshot is 1). The pieces overlap: count the
+                  tiles across the whole screenshot, not inside one piece. null if you are not sure.
+                  This does not change name or count.
   A small icon under the number (a figure with a check mark) is not a count - ignore it.
   Skip the bottom row of tiles whose captions are cut off by the edge of the screen; do not mention it in notes.
 
@@ -199,6 +211,7 @@ Over the picture on the left there may be two labels: one meaning "mastered" and
                           visible and the label is not there;
                   null  - that place is covered by something (a character in the foreground, the cursor) or cut off.
   owned_label     the same for the "N owned" label.
+  row, col        null.
   Skip a card without a visible title.
 
 FOR ANY SCREEN:
@@ -210,6 +223,11 @@ notes - only what could NOT be read: which name or number and where on the scree
   If everything was read - an empty string. Do not describe the course of the work, the overlap of the pieces
   or skipped duplicates.
 """
+# Added to the request when the app has found the tile grid on the screenshot itself (continuity.grid):
+# with the number of tiles in a row known, the pieces of the screenshot are easier to count across.
+RU_GRID_HINT = "\nПодсказка для row и col: в каждом полном ряду этого скриншота [cols] плиток.\n"
+EN_GRID_HINT = "\nA hint for row and col: every full row of this screenshot holds [cols] tiles.\n"
+
 # what the game calls itself and a blueprint in each client language (item names: warframe.market)
 GAME_LANGUAGE = {
     "ru": ("Russian", "Чертёж"),
@@ -231,11 +249,11 @@ def task(game_lang: Optional[str] = None, ui_lang: Optional[str] = None) -> Task
         body = RU_BODY
         if ui_lang != "ru":
             body += f"\nWrite the notes field in {NOTES_LANGUAGE[ui_lang]}.\n"
-        return Task(SYSTEM_FILES, SYSTEM_ATTACHED, RU_HEAD_FILES + body, RU_HEAD_ATTACHED + body, SCHEMA)
+        return Task(SYSTEM_FILES, SYSTEM_ATTACHED, RU_HEAD_FILES + body, RU_HEAD_ATTACHED + body, SCHEMA, RU_GRID_HINT)
     language, blueprint = GAME_LANGUAGE[game_lang]
     body = EN_BODY.replace("LANGUAGE", language).replace("BLUEPRINT", blueprint)
     body += f"\nWrite the notes field in {NOTES_LANGUAGE[ui_lang]}.\n"
-    return Task(SYSTEM_FILES, SYSTEM_ATTACHED, EN_HEAD_FILES + body, EN_HEAD_ATTACHED + body, SCHEMA)
+    return Task(SYSTEM_FILES, SYSTEM_ATTACHED, EN_HEAD_FILES + body, EN_HEAD_ATTACHED + body, SCHEMA, EN_GRID_HINT)
 
 
 def clean_answer(data: Any) -> Dict[str, Any]:
@@ -268,9 +286,50 @@ def clean_answer(data: Any) -> Dict[str, Any]:
             "blueprint_word": it.get("blueprint_word") is True,
             "mastered_label": it.get("mastered_label") if isinstance(it.get("mastered_label"), bool) else None,
             "owned_label": it.get("owned_label") if isinstance(it.get("owned_label"), bool) else None,
+            "row": _place(it.get("row")),
+            "col": _place(it.get("col")),
         })
     return {"screen": data.get("screen") if data.get("screen") in SCREENS else "other",
             "items": items, "notes": str(data.get("notes") or "").strip()}
+
+
+def _place(value: Any) -> Optional[int]:
+    """A row or a column of the tile grid as the model named it: a small whole number from 1, or nothing."""
+    return value if isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 12 else None
+
+
+def check_places(shot: Dict[str, Any], rows: int, cols: int) -> bool:
+    """Can the places the model gave to the tiles of one screenshot be trusted?
+
+    They are used only to show the user the tile a doubtful line was read from, and a wrong picture
+    is worse than none.  So the places are kept only when they make sense together: every one inside
+    the grid found on the screenshot and no two items on one tile.  Otherwise all of them are dropped.
+    """
+    seen = set()
+    placed = 0
+    for it in shot["items"]:
+        row, col = it.get("row"), it.get("col")
+        if row is None or col is None:
+            continue
+        if row > rows or col > cols or (row, col) in seen:
+            placed = -1
+            break
+        seen.add((row, col))
+        placed += 1
+    if placed <= 0:
+        for it in shot["items"]:
+            it["row"] = it["col"] = None
+        return False
+    return True
+
+
+def tile_grid(path: Path) -> Optional[Dict[str, Any]]:
+    """Where the tiles stand on a screenshot of the inventory (continuity.grid); None for any other picture."""
+    try:
+        return continuity.grid(path) if continuity.available() else None
+    except Exception:  # the places are a convenience: a picture that cannot be measured is read all the same
+        log.exception("could not find the tile grid of %s", path.name)
+        return None
 
 
 def read_screenshot(provider: providers.Provider, work_dir: Path, tiles: List[Path], job_task: Task,
@@ -366,6 +425,8 @@ def combine(per_shot: List[Dict[str, Any]], catalog: Dict[str, Any]) -> Dict[str
                          "count_known": (visible or screen == "inventory") and not hidden, "shot": shot_name}
                 if hidden:
                     entry["count_hidden"] = True
+                if screen == "inventory" and it.get("row") and it.get("col"):
+                    entry["pos"] = [it["row"], it["col"]]     # the tile it was read from, for the review
                 parts.append(entry)
         if shot["notes"]:
             notes.append(f"{shot_name}: {shot['notes']}")
@@ -459,8 +520,15 @@ class Job:
                         entry["state"] = "reading"
                     try:
                         tiles = shots.make_tiles(entry["path"], self._work / f"shot{idx:03d}")
-                        res = read_screenshot(provider, tiles[0].parent, tiles, job_task, holder=self._procs)
+                        found = tile_grid(entry["path"])
+                        shot_task = job_task.with_grid(len(found["cols"])) if found else job_task
+                        res = read_screenshot(provider, tiles[0].parent, tiles, shot_task, holder=self._procs)
                         res["shot"] = entry["name"]
+                        if res["screen"] != "inventory" or not found:
+                            for it in res["items"]:
+                                it["row"] = it["col"] = None
+                        else:
+                            check_places(res, len(found["rows"]), len(found["cols"]))
                         with self._lock:
                             self._results.append(res)
                             entry.update({"state": "done", "parts": len(res["items"]), "screen": res["screen"]})
@@ -597,7 +665,7 @@ class Job:
                 "changed": len(rep["changes"]["changed"]),
                 "removed_list": [{"item": names.get(s, s), "count": have.get(s, 0)} for s in rep["changes"]["removed"][:80]],
                 "matched": [{"name": m["name"], "item": m["item"], "count": m["count"], "status": m["status"],
-                             "shot": m["shot"]} for m in rep["matched"]],
+                             "shot": m["shot"], "entry": m.get("entry"), "pos": m.get("pos")} for m in rep["matched"]],
                 "review": rep["review"],
                 "skipped": [{"name": s["name"], "status": s["status"]} for s in rep["skipped"]
                             if s["status"] in ("built", "not_prime")],
@@ -606,6 +674,32 @@ class Job:
             for mode in reports:
                 reports[mode]["mastery"] = {"applied": marks["applied"], "review": marks["review"]}
         return reports
+
+    def fix(self, entry: int, count: Optional[int] = None, slug: Optional[str] = None, skip: bool = False) -> None:
+        """The user corrected one line of the reading before accepting it: another number, the part of
+        the catalog it really is, or "leave this line out".  Nothing is read from the screenshots again."""
+        with self._lock:
+            if self.state != "review" or self.combined is None:
+                raise RecognizeError(tr("Нет результата распознавания, который можно поправить"), "state")
+            parts = self.combined["parts"]
+            if not 0 <= entry < len(parts):
+                raise RecognizeError(tr("Такой строки в прочитанном нет"), "state")
+            row = dict(parts[entry])
+            if skip:
+                row["skip"] = True
+            if slug is not None:
+                if slug not in self.catalog["part_index"]:
+                    raise RecognizeError(tr("Такой прайм-части в каталоге нет"), "state")
+                row["slug"] = slug
+                row.pop("skip", None)
+            if count is not None:
+                row["count"] = max(1, min(9999, int(count)))
+                row["count_known"] = True
+                row.pop("count_hidden", None)
+            combined = dict(self.combined)
+            combined["parts"] = parts[:entry] + [row] + parts[entry + 1:]
+        self._enter_review(combined)
+        save_pending(self)
 
     def apply(self, mode: str, force: bool = False) -> Dict[str, Any]:
         with self._lock:

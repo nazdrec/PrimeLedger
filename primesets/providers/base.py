@@ -13,7 +13,7 @@ import base64
 import json
 import mimetypes
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -46,9 +46,17 @@ class Task:
     prompt_files: str        # {files} -- the list of file names
     prompt_attached: str
     schema: Dict[str, Any]
+    grid_hint: str = ""      # [cols] -- how many tiles a row of this screenshot holds, when that is known
 
     def files_text(self, tiles: List[Path]) -> str:
         return self.prompt_files.format(files="\n".join(f"  {t.name}" for t in tiles))
+
+    def with_grid(self, cols: int) -> "Task":
+        """The same request for a screenshot on which the app has found the tile grid."""
+        if not self.grid_hint:
+            return self
+        hint = self.grid_hint.replace("[cols]", str(int(cols)))
+        return replace(self, prompt_files=self.prompt_files + hint, prompt_attached=self.prompt_attached + hint)
 
 
 class Provider:

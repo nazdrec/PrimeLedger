@@ -322,13 +322,13 @@ class Request(Base):
     def test_an_answer_is_never_taken_on_trust(self):
         got = recognize.clean_answer({"screen": "desktop", "notes": None, "extra": 1, "items": [
             {"name": "  Васто Прайм: Ствол ", "rank": "30", "count": "3", "count_visible": "yes", "cut_top": 1,
-             "blueprint_word": True, "mastered_label": "true", "owned_label": False, "junk": {}},
-            {"name": ""}, "not an item", {"name": "Мираж Прайм", "rank": True, "count": None}]})
+             "blueprint_word": True, "mastered_label": "true", "owned_label": False, "junk": {}, "row": 2, "col": "3"},
+            {"name": ""}, "not an item", {"name": "Мираж Прайм", "rank": True, "count": None, "row": 0, "col": True}]})
         self.assertEqual(got, {"screen": "other", "notes": "", "items": [
             {"name": "Васто Прайм: Ствол", "rank": None, "count": 3, "count_visible": False, "cut_top": False,
-             "blueprint_word": True, "mastered_label": None, "owned_label": False},
+             "blueprint_word": True, "mastered_label": None, "owned_label": False, "row": 2, "col": None},
             {"name": "Мираж Прайм", "rank": None, "count": 1, "count_visible": False, "cut_top": False,
-             "blueprint_word": False, "mastered_label": None, "owned_label": None}]})
+             "blueprint_word": False, "mastered_label": None, "owned_label": None, "row": None, "col": None}]})
         for junk in (["a list"], {"answer": 42}, "text", None):
             with self.assertRaises(ProviderError):
                 recognize.clean_answer(junk)

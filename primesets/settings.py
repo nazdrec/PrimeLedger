@@ -26,6 +26,8 @@ DEFAULTS: Dict[str, Any] = {
     "base_urls": {},           # provider -> another address of its API (a compatible gateway)
     "use_proxy": [],           # providers that go through the proxy kept in the vault
     "parallel": DEFAULT_PARALLEL,
+    "check_updates": True,     # ask the page of the project once at the start whether a newer version is out
+    "welcomed": False,         # the first-start guide has been shown
 }
 
 _lock = threading.RLock()
@@ -60,6 +62,8 @@ def _clean(raw: Dict[str, Any]) -> Dict[str, Any]:
     except (TypeError, ValueError):
         parallel = DEFAULT_PARALLEL
     data["parallel"] = max(1, min(4, parallel))
+    data["check_updates"] = raw.get("check_updates") is not False
+    data["welcomed"] = raw.get("welcomed") is True
     return data
 
 
@@ -81,6 +85,9 @@ def save(patch: Dict[str, Any]) -> Dict[str, Any]:
         for key in ("language", "game_language", "provider", "parallel"):
             if key in patch:
                 data[key] = patch[key]
+        for key in ("check_updates", "welcomed"):
+            if key in patch:
+                data[key] = bool(patch[key])
         for key in ("models", "base_urls"):
             if isinstance(patch.get(key), dict):
                 merged = dict(data.get(key) if isinstance(data.get(key), dict) else {})
@@ -137,6 +144,14 @@ def proxied(pid: str) -> bool:
 
 def parallel() -> int:
     return load()["parallel"]
+
+
+def check_updates() -> bool:
+    return bool(load()["check_updates"])
+
+
+def welcomed() -> bool:
+    return bool(load()["welcomed"])
 
 
 def extra(key: str) -> Any:

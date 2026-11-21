@@ -174,6 +174,113 @@ def plan_ducats(offers: List[Dict[str, Any]], target: int, max_copies: int = 20)
     return answer(chosen)
 
 
+# --------------------------------------------------------------------------- selling
+def buyers_from_orders(top: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Buy orders of players who are in the game right now, the most generous first.
+
+    Only they can be traded with at once -- that is what "who buys my set now" needs.
+    """
+    out = []
+    for o in top.get("buy") or []:
+        price, user = o.get("platinum"), str(o.get("user") or "").strip()
+        if o.get("status") != "ingame" or not user or not isinstance(price, (int, float)) or price <= 0:
+            continue
+        qty = o.get("quantity")
+        out.append({"user": user, "platinum": int(price) if float(price).is_integer() else price,
+                    "quantity": int(qty) if isinstance(qty, (int, float)) and qty >= 1 else 1,
+                    "reputation": o.get("reputation")})
+    out.sort(key=lambda r: (-r["platinum"], -r["quantity"], r["user"].lower()))
+    return out
+
+
+def recent_deals(days: List[Dict[str, Any]], today: Optional[date] = None, span: int = 7) -> int:
+    """How many deals the statistics count over the last `span` days (the day before `today` and back:
+    the site adds a day to its statistics only when the day is over)."""
+    today = today or date.today()
+    first = today - timedelta(days=span)
+    total = 0
+    for row in days or []:
+        d = _parse_day(row.get("date", ""))
+        vol = row.get("volume") or 0
+        if d is not None and first <= d <= today and isinstance(vol, (int, float)) and vol > 0:
+            total += int(vol)
+    return total
+
+
+FAST_DEALS = 14         # two deals a day and more: such a set finds a buyer quickly
+SLOW_DEALS = 3          # fewer than three a week: it may wait for its buyer for days
+
+
+def sale_speed(deals: Optional[int]) -> str:
+    """"fast" | "normal" | "slow" by the deals closed over the last week; unknown counts as slow."""
+    if deals is None or deals < SLOW_DEALS:
+        return "slow"
+    return "fast" if deals >= FAST_DEALS else "normal"
+
+
+def plan_sales(items: List[Dict[str, Any]], target: float) -> Dict[str, Any]:
+    """Which sets to sell to get at least `target` platinum.
+
+    items: [{"platinum": the price of one copy, "copies": how many can be sold,
+             "deals": deals closed over the last week or None}, ...]
+    Returns {"picks": [{"index": item number, "count": copies to sell}], "platinum", "reached"}.
+
+    What is bought often goes first, the dearer before the cheaper: a sale that happens today is worth
+    more than a better price that waits for a week.  Then whatever turned out not to be needed is taken
+    back, starting from the slowest and cheapest, so the list is no longer than the target asks for.
+    """
+    rank = {"fast": 2, "normal": 1, "slow": 0}
+    units: List[tuple] = []                      # one entry per copy: (speed, price, item)
+    for index, it in enumerate(items):
+        try:
+            price, copies = float(it["platinum"]), int(it.get("copies") or 1)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if price <= 0 or copies <= 0:
+            continue
+        speed = rank[sale_speed(it.get("deals"))]
+        units.extend((speed, price, index) for _ in range(min(copies, 99)))
+
+    def answer(chosen: List[tuple]) -> Dict[str, Any]:
+        counts: Dict[int, int] = {}
+        for _speed, _price, index in chosen:
+            counts[index] = counts.get(index, 0) + 1
+        total = sum(u[1] for u in chosen)
+        return {"picks": [{"index": i, "count": n} for i, n in sorted(counts.items())],
+                "platinum": int(total) if float(total).is_integer() else round(total, 2),
+                "reached": total >= target}
+
+    if target <= 0 or not units:
+        return {"picks": [], "platinum": 0, "reached": target <= 0}
+    units.sort(key=lambda u: (-u[0], -u[1], u[2]))
+    chosen, total = [], 0.0
+    for u in units:
+        if total >= target:
+            break
+        chosen.append(u)
+        total += u[1]
+    for u in sorted(chosen, key=lambda u: (u[0], u[1], -u[2])):      # the least wanted first
+        if total - u[1] >= target:
+            chosen.remove(u)
+            total -= u[1]
+    return answer(chosen)
+
+
+def spare_parts(catalog: Dict[str, Any], items: Dict[str, int]) -> List[Dict[str, Any]]:
+    """Parts that make up no full set: what is left over after the complete copies, and the parts of
+    sets that are not complete yet.  `near` marks the parts of a set that lacks a single part to
+    the next full copy -- those are better kept until it is found."""
+    out = []
+    for slug, st in catalog["sets"].items():
+        prog = set_progress(st, items)
+        if not prog["spare"]:
+            continue
+        lacking = sum(m["count"] for m in prog["missing"])
+        for spare in prog["spare"]:
+            out.append({"slug": spare["slug"], "set": slug, "count": spare["count"], "near": lacking == 1})
+    return out
+
+
 # --------------------------------------------------------------------------- price
 def price_from_orders(top: Dict[str, Any]) -> Dict[str, Any]:
     """Price = the cheapest sell order among players who are in the game right now.

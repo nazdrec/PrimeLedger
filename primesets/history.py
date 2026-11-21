@@ -121,12 +121,15 @@ def snapshot(items: Dict[str, int], source: str = "", note: str = "", mode: str 
         if snaps and snaps[-1]["items"] == items:
             return False
         entry = {"at": _now(), "source": source, "note": note, "mode": mode, "items": items}
-        manual = source == "manual"
-        if (manual and len(snaps) >= 2 and snaps[-1].get("source") == "manual"
+        # edits by hand come one click at a time, and so do sales: neighbours of one kind are one update
+        if (source in ("manual", "sale") and len(snaps) >= 2 and snaps[-1].get("source") == source
                 and _seconds_between(snaps[-1]["at"], entry["at"]) <= MANUAL_MERGE_SECONDS):
             if snaps[-2]["items"] == items:
                 snaps.pop()                      # the edits were undone: no update at all
             else:
+                if source == "sale":             # what was sold in this sitting, one after another
+                    told = [n for n in (str(snaps[-1].get("note") or ""), note) if n]
+                    entry["note"] = "; ".join(told)[-400:]
                 snaps[-1] = entry
         else:
             snaps.append(entry)

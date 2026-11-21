@@ -318,6 +318,112 @@ def is_grid(path: Path) -> bool:
     return answer
 
 
+# --------------------------------------------------------------------------- where the tiles stand
+ROW_PITCH = (1.00, 1.14)        # rows stand a little further apart than columns: 296 against 278 px at 1440 lines
+TILE_SHARE = 0.92               # a tile is a square of this share of the column pitch; the rest is the gap
+ROW_VISIBLE = 0.30              # a row cut by an edge of the list counts as a row when this much of it is seen
+
+
+def grid(path: Path) -> Optional[Dict[str, Any]]:
+    """Where the tiles stand on an inventory screenshot, in the screenshot's own pixels.
+
+    Returns {"cols": [(x0, x1), ...], "rows": [(y0, y1), ...], "size": (w, h)} or None when the
+    screenshot shows no tile grid.  The rows go from the top; a row cut by the upper or the lower
+    edge of the list is among them when a fair part of it is visible -- as a person would count them.
+    """
+    size = _size(path)
+    if not size:
+        return None
+    page = _load(path, size[1])
+    if page is None or not page.lattice:
+        return None
+    from PIL import Image
+    left, pitch, cols = page.lattice
+    coarse = page.coarse
+    w, h = coarse.size
+    x0, x1 = max(0, round(left)), min(w, round(left + cols * pitch))
+    if x1 - x0 < 8 or h < 16:
+        return None
+    profile = coarse.crop((x0, 0, x1, h)).resize((1, h), Image.BOX).tobytes()
+    total = [0]
+    for v in profile:
+        total.append(total[-1] + v)
+
+    def mean(a: float, b: float) -> Optional[float]:
+        a, b = max(0, round(a)), min(h, round(b))
+        return (total[b] - total[a]) / (b - a) if b > a else None
+
+    tile = TILE_SHARE * pitch
+    best: Tuple[float, float, float] = (-1.0, 0.0, 0.0)          # (contrast, row pitch, top of a row)
+    steps = int((ROW_PITCH[1] - ROW_PITCH[0]) * pitch * 4) + 1
+    for n in range(steps):
+        row = ROW_PITCH[0] * pitch + n * 0.25
+        gap = row - tile
+        if gap < 1.5:
+            continue
+        phase = 0.0
+        while phase < row:
+            inside, between = [], []
+            top = phase - row
+            while top < h:
+                a = mean(top, top + tile)
+                b = mean(top - gap, top)
+                if a is not None:
+                    inside.append(a)
+                if b is not None:
+                    between.append(b)
+                top += row
+            if inside and between:
+                contrast = sum(inside) / len(inside) - sum(between) / len(between)
+                if contrast > best[0]:
+                    best = (contrast, row, phase)
+            phase += 0.5
+    contrast, row, phase = best
+    if contrast <= 0:
+        return None
+    band_top = _band_rows(size[1], size[1])[0]
+    scale = page.scale
+    rows = []
+    top = phase - row
+    while top < h:
+        seen = (min(h, top + tile) - max(0.0, top)) / tile
+        if seen >= ROW_VISIBLE:
+            rows.append((band_top + round(max(0.0, top) / scale), band_top + round(min(h, top + tile) / scale)))
+        top += row
+    edge = (pitch - tile) / 2
+    columns = [(round((left + c * pitch + edge) / scale), round((left + c * pitch + edge + tile) / scale)) for c in range(cols)]
+    return {"cols": columns, "rows": rows, "size": size}
+
+
+def tile_box(path: Path, row: int, col: int, margin: float = 0.06) -> Optional[Tuple[int, int, int, int]]:
+    """The place of the tile in the given row and column (both from 1) with a little room around it."""
+    found = grid(path)
+    if not found or not (1 <= row <= len(found["rows"])) or not (1 <= col <= len(found["cols"])):
+        return None
+    (x0, x1), (y0, y1) = found["cols"][col - 1], found["rows"][row - 1]
+    pad = round((x1 - x0) * margin)
+    w, h = found["size"]
+    return (max(0, x0 - pad), max(0, y0 - pad), min(w, x1 + pad), min(h, y1 + pad))
+
+
+def tile_picture(path: Path, row: int, col: int, side: int = 240) -> Optional[bytes]:
+    """A small JPEG of one tile, for showing next to the line that was read from it."""
+    box = tile_box(path, row, col)
+    if box is None:
+        return None
+    import io
+    from PIL import Image
+    try:
+        with Image.open(path) as im:
+            piece = im.convert("RGB").crop(box)
+    except Exception:
+        return None
+    piece.thumbnail((side, side))
+    out = io.BytesIO()
+    piece.save(out, "JPEG", quality=85)
+    return out.getvalue()
+
+
 def _thumb(page: _Page) -> Optional[Tuple[float, float]]:
     """The scrollbar thumb: how far it stands from the top and from the bottom of the list band,
     in pixels of a 1440-line screenshot.  None when no thumb is seen.
