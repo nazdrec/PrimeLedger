@@ -137,12 +137,13 @@ const post = (path, payload) => api(path, {
 });
 
 let toastTimer = 0;
-function toast(text) {
+// action: {label, run} -- a button inside the message, to take back what was just done; such a message stays longer
+function toast(text, action) {
   const el = $("#toast");
-  el.textContent = text;
+  el.replaceChildren(String(text), action ? h("button", { class: "toast-btn", onclick: () => { el.hidden = true; action.run(); } }, action.label) : "");
   el.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { el.hidden = true; }, 3600);
+  toastTimer = setTimeout(() => { el.hidden = true; }, action ? 9000 : 3600);
 }
 
 // ----------------------------------------------------------------- state
@@ -151,6 +152,7 @@ const S = {
   market: new Map(),        // set slug -> {state: loading|done|error, data, error}
   lite: new Map(),          // set slug -> price-only answer (for the "почти собраны" list)
   parts: new Map(),         // "scope:slug" -> {state, data}
+  copied: new Set(),        // "part slug|seller": the message for this seller was copied (its text stays in sight)
   reviewOpen: false,
   allParts: null,
   tab: "complete",
@@ -513,6 +515,69 @@ function relicTitle(part) {
   if (!part.relics.length) return "";
   return part.relics.map((r) => (r.drops ? t("{0} — падает", r.name) : r.wfm_vaulted === false ? t("{0} — вне миссий", r.name) : t("{0} — в хранилище", r.name))).join("\n");
 }
+/* Who to write to about a missing part: its cheapest sellers who are in the game, each with a message
+   in the site's own format.  They come with the price of the part, in the same answer of the market. */
+function sellersBlock(set, part, row) {
+  if (!Array.isArray(row.sellers)) return null;      // an answer without sellers: the server is still the one started before the update
+  const box = h("div", { class: "sellers" });
+  if (!row.sellers.length) {
+    box.append(h("div", { class: "sellers-none" },
+      !row.orders_at ? t("маркет не ответил")
+        : row.price == null ? t("Эту часть сейчас никто не продаёт.")
+          : t("В игре эту часть сейчас никто не продаёт. На сайте её предлагают от {0} пл.", fmt(row.price))));
+    return box;
+  }
+  box.append(h("div", { class: "sellers-title" }, t("Продавцы в игре")));
+  for (const sl of row.sellers) {
+    const key = part.slug + "|" + sl.user;
+    const copied = S.copied.has(key);
+    const meta = [typeof sl.reputation === "number" && sl.reputation > 0 ? t("репутация {0}", sl.reputation) : null,
+      sl.quantity > 1 ? t("у него {0} шт.", sl.quantity) : null].filter(Boolean).join(" · ");
+    box.append(h("div", { class: "seller" },
+      h("span", { class: "seller-name", title: sl.user }, sl.user),
+      h("div", { class: "seller-price num" }, h("b", null, pl(sl.platinum)),
+        sl.count > 1 ? h("div", { class: "sub" }, t("за {0}: {1}", sl.count, fmt(sl.platinum * sl.count))) : null),
+      h("div", { class: "seller-actions" },
+        h("button", { class: "btn subtle", title: sl.message,
+          onclick: async () => { await copyText(sl.message, t("Сообщение скопировано — вставьте его в чат игры")); S.copied.add(key); refreshRow(set.slug); } },
+          icon(copied ? "check" : "copy"), t("Сообщение")),
+        h("button", { class: "btn subtle", title: t("Покупка состоялась: занести в инвентарь {0} шт.", sl.count),
+          onclick: () => boughtPart(set, part, sl) }, t("Купил"))),
+      meta ? h("div", { class: "seller-meta" }, meta) : null,
+      // after the first press the text stays in sight: it shows what went to the clipboard and can be selected by hand
+      copied ? h("input", { class: "msg-line", readonly: true, value: sl.message, "aria-label": t("Сообщение продавцу"),
+        onfocus: (e) => e.target.select() }) : null));
+  }
+  return box;
+}
+/* "Купил": the part goes into the inventory at once.  The app cannot see a trade, it is told about it;
+   the message that follows offers to take the press back. */
+async function boughtPart(set, part, sl) {
+  try {
+    S.data = await post("/api/inventory/bought", { slug: part.slug, count: sl.count, platinum: sl.platinum, seller: sl.user });
+  } catch (err) { toast(err.message); return; }
+  const complete = S.data.complete.some((x) => x.slug === set.slug);
+  const what = part.name + (sl.count > 1 ? ` ×${sl.count}` : "");
+  afterPurchase(set.slug, complete);
+  toast(complete ? t("Куплено: {0}. Комплект «{1}» собран.", what, set.title) : t("Куплено: {0}. Часть занесена в инвентарь.", what),
+    { label: t("Отменить"), run: () => undoBought(set.slug, part, sl.count) });
+}
+async function undoBought(setSlug, part, count) {
+  try { S.data = await post("/api/inventory/bought", { slug: part.slug, count, undo: true }); }
+  catch (err) { toast(err.message); return; }
+  afterPurchase(setSlug, false);
+  toast(t("Покупка отменена: часть убрана из инвентаря"));
+}
+// the inventory changed through a purchase (or its undoing): show it, and do not announce it as news
+function afterPurchase(setSlug, complete) {
+  S.parts.delete("missing:" + setSlug);             // what this set lacks is different now
+  if (complete) S.open.delete(setSlug);             // it has moved to the complete sets
+  render();
+  queueMarket(false);                               // a set that has just become complete has no price yet
+  const still = S.data.partial.find((x) => x.slug === setSlug);
+  if (still && S.open.has(setSlug)) loadParts(still, "missing", false);
+  ownUpdateSeen();
+}
 function partsPanel(set, scope) {
   const key = scope + ":" + set.slug;
   const pm = S.parts.get(key);
@@ -524,7 +589,7 @@ function partsPanel(set, scope) {
     let priceText = "";
     if (pm && pm.state === "loading" && (scope === "all" || lacks)) priceText = h("span", { class: "skeleton", style: "width:44px" });
     else if (priceOf[p.slug]) priceText = priceOf[p.slug].price != null ? pl(priceOf[p.slug].price) : "—";
-    return h("div", { class: "part" },
+    const line = h("div", { class: "part" },
       thumb(p.thumb, true),
       h("div", null,
         h("div", { class: "part-name", title: p.en }, p.label),
@@ -532,6 +597,7 @@ function partsPanel(set, scope) {
       h("div", { class: "have num" + (lacks ? " lack" : "") },
         lacks ? t("не хватает {0}", p.missing) : [t("есть {0}", p.owned), p.quantity > 1 ? t("нужно {0}", p.quantity) : null].filter(Boolean).join(" · ")),
       h("div", { class: "part-price num" }, priceText));
+    return lacks && priceOf[p.slug] ? [line, sellersBlock(set, p, priceOf[p.slug])] : line;
   }));
   const totals = h("div", { class: "totals num" });
   const m = S.market.get(set.slug);
@@ -597,9 +663,18 @@ function detail(set, scope) {
     left.append(h("div", { class: "callout" }, icon("alert"),
       h("div", null, t("Этот комплект у вас не освоен. Если продать его сейчас, очки мастерства за него придётся добывать заново — сначала постройте и прокачайте."))));
   }
+  const pm = scope === "missing" ? S.parts.get("missing:" + set.slug) : null;
+  if (partsStale(pm)) {
+    left.append(h("div", { class: "callout" }, icon("alert"),
+      h("div", null, t("Предложения запрошены {0}: продавцы могли выйти из игры, а цены — измениться. Обновите, прежде чем писать.", stampFmt.format(new Date(pm.data.oldest_at * 1000))))));
+  }
   left.append(partsPanel(set, scope));
+  const asking = Boolean(pm && pm.state === "loading");
   left.append(h("div", { class: "actions" },
     h("a", { class: "link", href: set.market_url, target: "_blank", rel: "noopener" }, icon("external"), t("Открыть на warframe.market")),
+    scope === "missing" ? h("button", { class: "btn subtle", disabled: asking,
+      title: t("Заново запросить предложения по недостающим частям: продавцы меняются каждую минуту"),
+      onclick: () => loadParts(set, "missing", true) }, icon("refresh", asking ? "spin" : ""), asking ? t("Запрашиваю…") : t("Обновить продавцов")) : null,
     scope === "all" && set.complete > 0 ? h("button", { class: "btn subtle", title: t("Строка для торгового чата с этим комплектом и его ценой"),
       onclick: () => {
         if (setPriceOf(set.slug) == null) { toast(t("Цена ещё не загружена или комплект сейчас никто не продаёт")); return; }
@@ -610,10 +685,16 @@ function detail(set, scope) {
   return h("div", { class: "detail" }, left, h("div", null, chartPanel(set)));
 }
 
+// the offers behind the prices of the parts go out of date fast: sellers leave the game
+function partsStale(entry) {
+  return Boolean(entry && entry.state === "done" && entry.data.oldest_at && Date.now() / 1000 - entry.data.oldest_at > entry.data.ttl_orders);
+}
 async function loadParts(set, scope, force) {
   const key = scope + ":" + set.slug;
   const cur = S.parts.get(key);
-  if (!force && cur && cur.state !== "error") return;
+  // what is known is kept -- except the sellers of the missing parts once they are out of date:
+  // a message is written to them, so they are asked anew (the server answers from its cache while that is fresh)
+  if (!force && cur && cur.state !== "error" && !(scope === "missing" && partsStale(cur))) return;
   S.parts.set(key, { state: "loading" });
   refreshRow(set.slug);
   try {
@@ -1466,7 +1547,7 @@ function openBaroDialog() {
 // ----------------------------------------------------------------- history: what changed and what it is worth
 const HIST = { data: null, state: "idle", error: "", open: new Set(), view: "now" };
 const SOURCE_RU = { screenshots: t("по скриншотам"), "screenshots+manual": t("по скриншотам, с правками вручную"), manual: t("правки вручную"),
-  sale: t("продажа") };
+  sale: t("продажа"), purchase: t("покупка") };
 async function loadHistory() {
   try { HIST.data = await api("/api/history"); HIST.state = "done"; }
   catch (err) { HIST.state = "error"; HIST.error = err.message; }
@@ -1855,6 +1936,10 @@ function afterSale(res) {
   for (const slug of [...S.market.keys()]) if (!alive.has(slug)) S.market.delete(slug);
   render();
   queueMarket(false);                 // a set that came back with an undone sale has no price yet
+  return ownUpdateSeen();
+}
+// the user's own press changed the inventory: the update it made is no news to announce
+function ownUpdateSeen() {
   return loadHistory().then(() => {
     const last = HIST.data && HIST.data.updates[0];
     if (last) historySeen(last.at);

@@ -9,7 +9,9 @@ sell, with live prices from warframe.market.
 
 - **Complete sets** — price on warframe.market, whether the set is vaulted, the 90-day price trend,
   and a warning when you have not mastered the item yet.
-- **Almost complete** — which parts are missing and what they cost.
+- **Almost complete** — which parts are missing, what they cost and who sells them: the three
+  cheapest sellers of each part who are in the game right now, with a ready message for every one.
+  Bought the part? One button puts it into your inventory.
 - **Ducats** — which sets give the most ducats per platinum, and a purchase calculator that picks
   the cheapest sets from sellers who are in the game right now and writes the message for each of them.
   And the other way round, "What to trade in to Baro": which of your spare parts are better
@@ -117,7 +119,8 @@ A sold set is easiest to take off the list with the *Sold…* button in its row.
   site's API rules ask.
 - "Screenshots with hints" reads only the files the game has already saved to its own screenshot folder.
   The app does not capture the screen, presses no keys and has no contact with the game.
-- The app cannot see a trade: the journal of sales is what you marked yourself with the "Sold" button.
+- The app cannot see a trade: the journal of sales is what you marked yourself with the "Sold"
+  button, and a purchase is what you marked with "Bought".
 - When Claude Code or Codex reads a screenshot it runs in a restricted mode: it can only look at
   the pictures in a temporary folder, cannot run commands and cannot reach other files.
 - On start the app asks the project's page on GitHub once whether a newer version is out (this

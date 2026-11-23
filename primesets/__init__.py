@@ -14,4 +14,4 @@ APP_NAME = "PrimeLedger"
 # User-Agent, so that the services the app talks to can find who made it.
 HOMEPAGE = "https://github.com/nazdrec/PrimeLedger"
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"

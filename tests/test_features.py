@@ -1,6 +1,7 @@
 """Offline tests of what version 1.1 added: the journal of sales, selling help, spare parts, the
 example inventory, the notice of a newer version, the tiles of a screenshot and the live check of
-the shooting.  No network, no real inventory.
+the shooting -- and of what 1.1.1 added: the sellers of a missing part and "Купил".  No network, no
+real inventory.
 
     python -m unittest discover -s tests -v
 """
@@ -326,6 +327,119 @@ class SpareParts(unittest.TestCase):
         self.assertEqual(rows["kavasa_prime_kubrow_collar_set"]["mastery"]["state"], "na")
 
 
+# --------------------------------------------------------------------------- who sells a missing part (version 1.1.1)
+class SellersOfMissingParts(unittest.TestCase):
+    def setUp(self):
+        clean_data()
+        self.cat = make_catalog()
+        put({"akstiletto_prime_blueprint": 1, "akstiletto_prime_barrel": 2, "akstiletto_prime_link": 1})   # both receivers are missing
+
+    def tearDown(self):
+        clean_data()
+
+    def state(self, orders):
+        asked = []
+
+        def top_orders(slug, force=False):
+            asked.append((slug, force))
+            if slug not in orders:
+                raise FetchError("the market did not answer")
+            return orders[slug], {"fetched_at": 1700000000.0 + len(asked), "stale": False}
+
+        return SimpleNamespace(catalog=self.cat, wfm=SimpleNamespace(top_orders=top_orders)), asked
+
+    def test_a_missing_part_comes_with_its_three_cheapest_sellers_who_are_in_the_game(self):
+        state, asked = self.state({"akstiletto_prime_receiver": {
+            "sell": [order("Dear", 30), order("Away", 5, "online"), order("Cheap", 12, quantity=3), order("Mid", 15),
+                     order("Fourth", 20)],
+            "buy": [order("Buyer", 99)]}})
+        got = server.parts_market(state, "akstiletto_prime_set", False, "missing")
+        self.assertEqual(asked, [("akstiletto_prime_receiver", False)])      # the one request the price needs anyway
+        row, = got["parts"]
+        self.assertEqual((row["slug"], row["units"], row["price"], row["basis"], row["orders_at"]),
+                         ("akstiletto_prime_receiver", 2, 12, "ingame", 1700000001.0))
+        self.assertEqual([(s["user"], s["platinum"], s["quantity"], s["count"]) for s in row["sellers"]],
+                         [("Cheap", 12, 3, 2), ("Mid", 15, 1, 1), ("Fourth", 20, 1, 1)])
+        # the line of the site word for word, then the name of the application; two are asked of the one who has them
+        self.assertEqual([s["message"] for s in row["sellers"]], [
+            '/w Cheap Hi! I want to buy: "Akstiletto Prime Receiver" for 12 platinum. (warframe.market) (x2, via PrimeLedger)',
+            '/w Mid Hi! I want to buy: "Akstiletto Prime Receiver" for 15 platinum. (warframe.market) (via PrimeLedger)',
+            '/w Fourth Hi! I want to buy: "Akstiletto Prime Receiver" for 20 platinum. (warframe.market) (via PrimeLedger)'])
+        self.assertEqual((got["total"], got["oldest_at"], got["ttl_orders"]), (24, 1700000001.0, server.config.TTL_TOP_ORDERS))
+
+    def test_a_seller_who_is_not_in_the_game_is_not_written_to(self):
+        state, _ = self.state({"akstiletto_prime_receiver": {"sell": [order("Away", 9, "online"), order("Site", 7, "online")],
+                                                             "buy": []}})
+        row, = server.parts_market(state, "akstiletto_prime_set", False, "missing")["parts"]
+        self.assertEqual((row["sellers"], row["price"], row["basis"]), ([], 7, "online"))
+
+    def test_a_part_the_market_did_not_answer_about_has_no_sellers(self):
+        state, asked = self.state({})
+        got = server.parts_market(state, "akstiletto_prime_set", True, "missing")
+        self.assertEqual(asked, [("akstiletto_prime_receiver", True)])
+        row, = got["parts"]
+        self.assertEqual((row["sellers"], row["orders_at"], row["price"]), ([], None, None))
+        self.assertEqual((got["total"], got["oldest_at"], len(got["errors"])), (None, None, 1))
+
+    def test_the_other_lists_of_parts_carry_no_sellers(self):
+        state, asked = self.state({slug: {"sell": [order("S", 6)], "buy": []} for slug in FULL_AKSTILETTO})
+        got = server.parts_market(state, "akstiletto_prime_set", False, "all")
+        self.assertEqual(len(asked), 4)
+        self.assertTrue(all(set(row) == {"slug", "units", "price", "basis"} for row in got["parts"]))
+        self.assertEqual(got["oldest_at"], 1700000001.0)
+
+    def test_the_scope_of_a_request_for_parts(self):
+        self.assertEqual([server.part_scope(v) for v in ("missing", "spare", "all", "", "anything")],
+                         ["missing", "spare", "all", "all", "all"])
+
+
+# --------------------------------------------------------------------------- "Купил": a part the user bought (version 1.1.1)
+class BoughtParts(unittest.TestCase):
+    def setUp(self):
+        clean_data()
+        self.cat = make_catalog()
+        put({"akstiletto_prime_blueprint": 1, "akstiletto_prime_barrel": 2, "akstiletto_prime_link": 1, "vasto_prime_barrel": 1})
+        history.sync(inventory.load())
+        self.state = SimpleNamespace(catalog=self.cat)
+
+    def tearDown(self):
+        clean_data()
+
+    def test_a_bought_part_goes_into_the_inventory_and_into_the_history(self):
+        server.bought(self.state, "akstiletto_prime_receiver", 2, 12, "  Cheap \n")
+        self.assertEqual(inventory.load()["items"]["akstiletto_prime_receiver"], 2)
+        self.assertEqual(inventory.load()["source"], "screenshots+manual")
+        new = history.updates(self.cat, inventory.load())[0]
+        self.assertEqual((new["source"], new["note"]), ("purchase", "Акстилетто Прайм: Приёмник ×2 за 24 пл (Cheap)"))
+        self.assertEqual([x["title"] for x in new["sets_up"]], ["Акстилетто Прайм"])
+
+    def test_a_purchase_entered_by_mistake_is_taken_back_and_leaves_no_trace(self):
+        before = dict(inventory.load()["items"])
+        server.bought(self.state, "akstiletto_prime_receiver", 1, 12, "Cheap")
+        self.assertEqual(len(history.updates(self.cat, inventory.load())), 2)
+        server.bought(self.state, "akstiletto_prime_receiver", 1, undo=True)
+        self.assertEqual(inventory.load()["items"], before)
+        self.assertEqual(len(history.updates(self.cat, inventory.load())), 1)      # the purchase and its undoing cancel out
+
+    def test_purchases_of_one_sitting_are_one_line_of_the_history(self):
+        server.bought(self.state, "akstiletto_prime_receiver", 2, 12, "Cheap")
+        server.bought(self.state, "vasto_prime_receiver", 1)                       # the price may be unknown
+        updates = history.updates(self.cat, inventory.load())
+        self.assertEqual(len(updates), 2)
+        self.assertEqual((updates[0]["source"], updates[0]["note"]),
+                         ("purchase", "Акстилетто Прайм: Приёмник ×2 за 24 пл (Cheap); Васто Прайм: Приёмник ×1"))
+
+    def test_what_cannot_be_a_purchase_changes_nothing(self):
+        before = dict(inventory.load()["items"])
+        for bad in ({"slug": "no_such_part"}, {"slug": "akstiletto_prime_set"}, {"slug": "akstiletto_prime_receiver", "count": 0},
+                    {"slug": "akstiletto_prime_receiver", "count": 100}, {"slug": "akstiletto_prime_receiver", "count": "two"},
+                    {"slug": "akstiletto_prime_receiver", "count": 1, "undo": True}):      # there is nothing to take back
+            with self.assertRaises(ValueError):
+                server.bought(self.state, **bad)
+        self.assertEqual(inventory.load()["items"], before)
+        self.assertEqual(len(history.updates(self.cat, inventory.load())), 1)
+
+
 # --------------------------------------------------------------------------- the example inventory
 class Example(unittest.TestCase):
     def setUp(self):
@@ -344,6 +458,7 @@ class Example(unittest.TestCase):
         self.assertEqual(mastery.load()["items"]["wukong_prime_set"]["state"], "none")
         for change in (lambda: inventory.set_count("vasto_prime_barrel", 9, self.cat),
                        lambda: sales.add(self.cat, "vasto_prime_set", 5),
+                       lambda: server.bought(SimpleNamespace(catalog=self.cat), "vasto_prime_barrel", 1, 5, "Seller"),
                        lambda: mastery.set_state("vasto_prime_set", "mastered", self.cat),
                        lambda: inventory.import_entries([{"name": "Васто Прайм: Ствол", "count": 1}], self.cat)):
             with self.assertRaises(ValueError):

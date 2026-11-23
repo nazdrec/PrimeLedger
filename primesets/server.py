@@ -633,12 +633,36 @@ def market(state: AppState, slug: str, force: bool, lite: bool = False) -> Dict[
     return out
 
 
+PART_SCOPES = ("all", "missing", "spare")
+SELLERS_SHOWN = 3       # a missing part is shown with this many of its cheapest sellers who are in the game
+
+
+def part_scope(value: str) -> str:
+    """The `scope` of a /api/parts-market request; anything unknown means every part."""
+    return value if value in PART_SCOPES else "all"
+
+
+def sellers_of_part(top: Dict[str, Any], item_en: str, units: int) -> List[Dict[str, Any]]:
+    """The cheapest sellers of a part who are in the game right now, each with the message for them.
+
+    units -- how many of the part the set still lacks: a seller who has that many is asked for all
+    of them (the price in the message stays the price of one, as on the site).
+    """
+    out = []
+    for offer in analysis.offers_from_orders(top)[:SELLERS_SHOWN]:
+        count = max(1, min(units, offer["quantity"]))
+        out.append({**offer, "count": count, "message": whisper(offer["user"], item_en, offer["platinum"], count)})
+    return out
+
+
 def parts_market(state: AppState, slug: str, force: bool, scope: str = "all") -> Dict[str, Any]:
     """Live prices of a set's parts.
 
     scope="all":     every part; `total` is the price of one set bought part by part.
     scope="missing": only the parts the inventory lacks for the next full copy;
-                     `total` is what it costs to buy exactly those.
+                     `total` is what it costs to buy exactly those.  Each part also comes with its
+                     cheapest sellers who are in the game (sellers_of_part) -- from the same answer
+                     of the market that gave the price, so no further request is made for them.
     scope="spare":   only the parts left over beyond the full copies; `total` is what they sell for.
     """
     cat = state.catalog
@@ -651,15 +675,23 @@ def parts_market(state: AppState, slug: str, force: bool, scope: str = "all") ->
     parts = []
     total: Optional[float] = 0
     errors = []
+    asked_at: List[float] = []
     for p in st["parts"]:
         if (scope == "missing" and p["slug"] not in lacking) or (scope == "spare" and p["slug"] not in spare):
             continue
         units = lacking[p["slug"]] if scope == "missing" else spare[p["slug"]] if scope == "spare" else p["quantity"]
-        row = {"slug": p["slug"], "units": units, "price": None, "basis": None}
+        row: Dict[str, Any] = {"slug": p["slug"], "units": units, "price": None, "basis": None}
+        if scope == "missing":
+            row.update(sellers=[], orders_at=None)
         try:
-            top, _ = state.wfm.top_orders(p["slug"], force=force)
+            top, meta = state.wfm.top_orders(p["slug"], force=force)
             price = analysis.price_from_orders(top)
             row["price"], row["basis"] = price["value"], price["basis"]
+            when = meta.get("fetched_at")
+            if isinstance(when, (int, float)):
+                asked_at.append(when)
+            if scope == "missing":
+                row.update(sellers=sellers_of_part(top, p["en"], units), orders_at=when)
         except FetchError as exc:
             errors.append(f"{p['slug']}: {exc}")
         if row["price"] is None:
@@ -667,7 +699,41 @@ def parts_market(state: AppState, slug: str, force: bool, scope: str = "all") ->
         elif total is not None:
             total += row["price"] * units
         parts.append(row)
-    return {"slug": slug, "scope": scope, "parts": parts, "total": total, "errors": errors}
+    return {"slug": slug, "scope": scope, "parts": parts, "total": total, "errors": errors,
+            "oldest_at": min(asked_at, default=None), "ttl_orders": config.TTL_TOP_ORDERS}
+
+
+MAX_BOUGHT = 99
+
+
+def bought(state: AppState, slug: str, count: Any = 1, platinum: Any = None, seller: str = "",
+           undo: bool = False) -> Dict[str, Any]:
+    """The user bought a part ("Купил" next to a seller): add it to the inventory.  undo=True takes
+    it back out -- the button was pressed by mistake.
+
+    The app cannot see a trade: it only writes down what it was told.  The update goes into the
+    history as a purchase, with what was bought, for how much and from whom.
+    """
+    cat = state.catalog
+    owner = cat["part_index"].get(slug) if cat else None
+    if not owner:
+        raise ValueError(f"unknown part: {slug}")
+    try:
+        n = int(count)
+    except (TypeError, ValueError):
+        raise ValueError(tr("Количество должно быть от 1 до 99")) from None
+    if not 1 <= n <= MAX_BOUGHT:
+        raise ValueError(tr("Количество должно быть от 1 до 99"))
+    part = next(p for p in cat["sets"][owner]["parts"] if p["slug"] == slug)
+    if undo:
+        note = tr("отмена покупки: {0}", part["name"] + (f" ×{n}" if n > 1 else ""))
+        return inventory.change({slug: -n}, cat, kind="purchase", note=note)
+    priced = isinstance(platinum, (int, float)) and not isinstance(platinum, bool) and 0 < platinum <= sales.MAX_PLATINUM
+    note = tr("{0} ×{1} за {2} пл", part["name"], n, int(platinum) * n) if priced else f"{part['name']} ×{n}"
+    who = " ".join(str(seller or "").split())[:60]
+    if who:
+        note += f" ({who})"
+    return inventory.change({slug: n}, cat, kind="purchase", note=note)
 
 
 def all_parts(state: AppState) -> List[Dict[str, Any]]:
@@ -857,7 +923,7 @@ class Handler(BaseHTTPRequestHandler):
                 slug = (q.get("slug") or [""])[0]
                 if not valid_slug(slug):
                     return self._error(400, "bad slug")
-                scope = "missing" if (q.get("scope") or [""])[0] == "missing" else "all"
+                scope = part_scope((q.get("scope") or [""])[0])
                 return self._json(parts_market(st, slug, (q.get("force") or ["0"])[0] == "1", scope))
             if path == "/api/parts":
                 return self._json({"parts": all_parts(st)})
@@ -933,6 +999,13 @@ class Handler(BaseHTTPRequestHandler):
                     return self._error(409, tr("Справочник комплектов ещё не загружен"))
                 slug = str(payload.get("slug") or "")
                 inventory.set_count(slug, int(payload.get("count") or 0), st.catalog)
+                st._inv_mtime = inventory.mtime()
+                return self._json(overview(st))
+            if path == "/api/inventory/bought":
+                if not st.catalog:
+                    return self._error(409, tr("Справочник комплектов ещё не загружен"))
+                bought(st, str(payload.get("slug") or ""), payload.get("count") or 1, payload.get("platinum"),
+                       str(payload.get("seller") or ""), undo=payload.get("undo") is True)
                 st._inv_mtime = inventory.mtime()
                 return self._json(overview(st))
             if path == "/api/inventory/dismiss-review":

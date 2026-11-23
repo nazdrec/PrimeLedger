@@ -709,3 +709,20 @@ a.btn { text-decoration: none; }
   .sale-row { grid-template-columns: 34px minmax(0, 1fr) auto; }
   .sale-row .btn { grid-column: 2 / -1; justify-self: start; }
 }
+
+/* version 1.1.1: the sellers of a missing part ("Почти собраны") */
+.sellers { margin: 0 0 8px 45px; padding: 2px 0 2px 12px; border-left: 2px solid var(--border); display: grid; gap: 6px; }
+.sellers + .part { border-top: 1px solid var(--border); }
+.sellers-title, .sellers-none { font-size: 12.5px; color: var(--muted); }
+.seller { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 2px 10px; }
+.seller-name { font-weight: 550; font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.seller-meta { grid-column: 1 / -1; font-size: 12.5px; color: var(--muted); margin-top: -3px; }
+.seller-price { text-align: right; white-space: nowrap; font-size: 13.5px; }
+.seller-price b { font-weight: 650; }
+.seller-price .sub { margin: 0; }
+.seller .msg-line { grid-column: 1 / -1; }
+@media (max-width: 560px) { .sellers { margin-left: 0; } }
+.seller-actions { display: flex; gap: 6px; }
+/* a message with a button that takes back what was just done */
+.toast-btn { all: unset; cursor: pointer; margin-left: 14px; font-weight: 650; text-decoration: underline; text-underline-offset: 3px; border-radius: 4px; }
+.toast-btn:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
