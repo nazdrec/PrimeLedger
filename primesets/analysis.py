@@ -404,3 +404,78 @@ def trend_from_days(days: List[Dict[str, Any]], window: int = config.TREND_WINDO
 
 def market_summary(top: Dict[str, Any], stats: Dict[str, Any]) -> Dict[str, Any]:
     return {"price": price_from_orders(top), "trend": trend_from_days(stats.get("days") or [])}
+
+
+# --------------------------------------------------------------------------- riven mods
+def _plat(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+
+
+def riven_floor(offers: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """The bottom of the market for the riven mods of one weapon, out of the offers at a fixed price.
+
+    floor      -- the lowest price among all the offers.  Most sellers of riven mods are offline:
+                  such an offer stands, but the deal has to wait for the seller;
+    floor_live -- the lowest among the sellers who are in the game or on the site right now.
+    """
+    prices = sorted(o["platinum"] for o in offers if _plat(o.get("platinum")))
+    live = sorted(o["platinum"] for o in offers if _plat(o.get("platinum")) and o.get("status") in ("ingame", "online"))
+    return {"floor": prices[0] if prices else None, "floor_live": live[0] if live else None,
+            "offers": len(prices), "live": len(live), "cheapest": prices[:5]}
+
+
+# --------------------------------------------------------------------------- relics
+REFINEMENTS = ("intact", "exceptional", "flawless", "radiant")
+RELIC_TIERS = ("common", "uncommon", "rare")
+# the chance of ONE reward of a tier, per cent: a relic holds three common rewards, two uncommon and one rare
+RELIC_CHANCES = {
+    "intact": (25.33, 11.0, 2.0),
+    "exceptional": (23.33, 13.0, 4.0),
+    "flawless": (20.0, 17.0, 6.0),
+    "radiant": (16.67, 20.0, 10.0),
+}
+# void traces it takes to bring a relic of this refinement to radiant
+RELIC_TRACES = {"intact": 100, "exceptional": 75, "flawless": 50, "radiant": 0}
+# A relic that no longer drops cannot be replaced, so every copy of it should be opened at its best:
+# among relics that gain the same from refinement the scarce one comes first.
+RELIC_STATUS_WEIGHT = {"missions": 1.0, "special": 1.15, "vaulted": 1.3, "unknown": 1.0}
+_STANDARD_RELIC = sorted(["common"] * 3 + ["uncommon"] * 2 + ["rare"])
+
+
+def relic_tier(chance: Any) -> str:
+    """The tier of a reward by its chance in an intact relic (25.33, 11 or 2 per cent); "" when unknown."""
+    if not isinstance(chance, (int, float)) or isinstance(chance, bool):
+        return ""
+    return "common" if chance >= 20 else "uncommon" if chance >= 5 else "rare"
+
+
+def relic_value(rewards: List[Dict[str, Any]], refinement: str) -> Optional[float]:
+    """What one opening of a relic brings on average, in platinum: the price of every reward by its
+    chance at this refinement.  A reward that is not traded (Forma) or has no price counts as nothing.
+
+    rewards: [{"tier": common|uncommon|rare, "price": platinum or None}, ...] -- six of them;
+    None for a relic that is not built the usual way (the chances above do not hold for it).
+    """
+    if refinement not in RELIC_CHANCES or sorted(r.get("tier") for r in rewards) != _STANDARD_RELIC:
+        return None
+    chance = dict(zip(RELIC_TIERS, RELIC_CHANCES[refinement]))
+    return sum(chance[r["tier"]] / 100.0 * float(r.get("price") or 0) for r in rewards)
+
+
+def relic_gain(rewards: List[Dict[str, Any]], refinement: str, status: str = "unknown") -> Optional[Dict[str, Any]]:
+    """What refining a relic to radiant gives.
+
+    now, radiant -- platinum of one opening as it is and once radiant;
+    gain         -- the difference: what the refinement adds to every opening;
+    traces       -- void traces the refinement costs;
+    per_100      -- the gain for 100 traces (a relic that is half refined costs less and gains less);
+    score        -- per_100 with the relic's own scarcity weighed in: what the relics are ranked by.
+    """
+    now, top = relic_value(rewards, refinement), relic_value(rewards, "radiant")
+    if now is None or top is None:
+        return None
+    traces = RELIC_TRACES[refinement]
+    gain = top - now
+    per_100 = gain * 100.0 / traces if traces else 0.0
+    return {"now": now, "radiant": top, "gain": gain, "traces": traces, "per_100": per_100,
+            "score": per_100 * RELIC_STATUS_WEIGHT.get(status, 1.0)}

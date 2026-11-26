@@ -19,8 +19,9 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional
 
-from . import (APP_NAME, HOMEPAGE, __version__, analysis, catalog as catalog_mod, config, continuity, demo, history, i18n,
-               inventory, live, mastery, providers, recognize, sales, settings, shots, updates, vault)
+from . import (APP_NAME, HOMEPAGE, __version__, analysis, catalog as catalog_mod, config, continuity, demo, droptables,
+               history, i18n, inventory, live, mastery, providers, recognize, relics, rivens, sales, scans, settings, shots,
+               updates, vault)
 from .cache import DiskCache
 from .i18n import N_, tr
 from .wfm import FetchError, WfmClient, valid_slug
@@ -60,6 +61,10 @@ class AppState:
         self._joins_lock = threading.Lock()
         self.live = live.Live(self.push)
         self.update: Dict[str, Any] = {"state": "off"}
+        self.scans: Dict[str, scans.ScanJob] = {}       # the readings of riven mods and of relics, one of each kind
+        self._scan_lock = threading.Lock()
+        self._indexes: Dict[str, Any] = {}              # what their captions are matched against, kept for a while
+        self._index_lock = threading.Lock()
 
     # -- a newer version ----------------------------------------------------
     def check_update(self, force: bool = False) -> None:
@@ -81,12 +86,86 @@ class AppState:
 
         threading.Thread(target=ask, name="update-check", daemon=True).start()
 
+    # -- riven mods and relics ----------------------------------------------
+    INDEX_KEEP = 300.0                   # seconds: the lists behind an index change once a day at most
+
+    def _index(self, name: str, build: Any) -> Any:
+        key = (name, settings.language(), settings.game_language())
+        with self._index_lock:
+            hit = self._indexes.get(name)
+            if hit and hit[0] == key and time.time() - hit[1] < self.INDEX_KEEP:
+                return hit[2]
+        built = build(*key[1:])
+        with self._index_lock:
+            self._indexes[name] = (key, time.time(), built)
+        return built
+
+    def riven_weapons(self) -> rivens.Weapons:
+        """The weapons riven mods exist for, by their names in the interface and in the game client."""
+        def build(lang: str, game: str) -> rivens.Weapons:
+            own = self.wfm.riven_weapons(i18n.LANGS[lang]["wfm"])[0]
+            other = None
+            if game != lang:
+                try:
+                    other = self.wfm.riven_weapons(i18n.LANGS[game]["wfm"])[0]
+                except FetchError:
+                    pass                 # the captions are then matched by the interface language and English
+            return rivens.Weapons(own, other)
+        return self._index("rivens", build)
+
+    def relic_index(self) -> relics.Index:
+        """Every void relic: its names, what it holds (the official drop tables) and whether it still drops."""
+        def build(lang: str, game: str) -> relics.Index:
+            own = self.wfm.items(i18n.LANGS[lang]["wfm"])[0]
+            other = None
+            if game != lang:
+                try:
+                    other = self.wfm.items(i18n.LANGS[game]["wfm"])[0]
+                except FetchError:
+                    pass
+            try:
+                drops = droptables.load(self.cache, self.wfm.assets)[0]
+            except FetchError:
+                drops = None             # the relics are still recognised; what they hold is then unknown
+            return relics.Index(own, other, drops)
+        return self._index("relics", build)
+
+    def reading(self) -> bool:
+        """Is any screenshot being read right now?  One reading at a time: they share the user's connection."""
+        return bool(self.job and self.job.state == "running") or any(j.state == "running" for j in self.scans.values())
+
+    def start_scan(self, kind: str) -> scans.ScanJob:
+        demo.switch(False)               # the user's own screenshots are being read: the example has done its job
+        with self._scan_lock:
+            if self.reading():
+                raise recognize.RecognizeError(tr("Распознавание уже идёт"), "busy")
+            paths = scans.files(kind)
+            if not paths:
+                raise recognize.RecognizeError(tr("В папке нет скриншотов"), "no_files")
+            job = scans.ScanJob(kind, paths, self.riven_weapons if kind == "rivens" else self.relic_index)
+            self.scans[kind] = job
+        threading.Thread(target=job.run, name=f"scan-{kind}", daemon=True).start()
+        return job
+
+    def scan_state(self, kind: str, refresh: bool = False) -> Dict[str, Any]:
+        job = self.scans.get(kind)
+        game = shots.game_new()
+        listed = []
+        for f in scans.files(kind):
+            try:
+                st = f.stat()
+            except OSError:
+                continue
+            listed.append({"name": f.name, "size": st.st_size, "mtime": st.st_mtime})
+        return {"kind": kind, "provider": providers.current().status(force=refresh), "job": job.snapshot() if job else None,
+                "files": listed, "game": {"dir": game["dir"], "exists": game["exists"], "new": len(game["files"])}}
+
     # -- recognition --------------------------------------------------------
     def start_recognition(self) -> recognize.Job:
         self.live.stop()
         demo.switch(False)               # the user's own screenshots are being read: the example has done its job
         with self._job_lock:
-            if self.job and self.job.state == "running":
+            if self.reading():
                 raise recognize.RecognizeError(tr("Распознавание уже идёт"), "busy")
             if not self.catalog:
                 raise recognize.RecognizeError(tr("Справочник комплектов ещё не загружен"), "no_catalog")
@@ -277,7 +356,7 @@ class AppState:
             now = time.time()
             if self.client_count() > 0:
                 continue
-            if self.job and self.job.state == "running":
+            if self.reading():
                 continue                     # never quit in the middle of reading screenshots
             idle = now - self.last_client_seen
             if self.ever_connected:
@@ -590,11 +669,14 @@ def overview(state: AppState) -> Dict[str, Any]:
         "partial": [],
         "limits": {"wfm_min_interval": config.WFM_MIN_INTERVAL, "ttl_orders": config.TTL_TOP_ORDERS,
                    "ttl_stats": config.TTL_STATISTICS, "trend_window": config.TREND_WINDOW_DAYS,
-                   "trend_threshold": config.TREND_THRESHOLD},
+                   "trend_threshold": config.TREND_THRESHOLD,
+                   "contract_interval": config.WFM_CONTRACT_MIN_INTERVAL, "ttl_rivens": config.TTL_RIVEN_OFFERS,
+                   "ttl_relics": config.TTL_RELIC_PRICES, "relic_weights": analysis.RELIC_STATUS_WEIGHT},
         "requests": state.wfm.counters(),
         "update": state.update,
         "demo": demo.on(),
         "welcomed": settings.welcomed(),
+        "extras": {"rivens": len(rivens.load()["items"]), "relics": len(relics.load()["items"])},
     }
     if cat:
         marks = mastery.load()
@@ -746,6 +828,154 @@ def all_parts(state: AppState) -> List[Dict[str, Any]]:
             out.append({"slug": p["slug"], "name": p["name"], "en": p["en"], "label": p["label"],
                         "set": st["title"], "set_slug": st["slug"], "quantity": p["quantity"]})
     out.sort(key=lambda r: (r["set"].lower(), r["label"]))
+    return out
+
+
+# --------------------------------------------------------------------------- riven mods
+def riven_market_url(slug: str) -> str:
+    """The riven mods of a weapon on warframe.market, the cheapest first, in the language of the interface."""
+    code = i18n.info()["wfm"]
+    return (f"{config.WFM_SITE}/{'' if code == 'en' else code + '/'}auctions/search"
+            f"?type=riven&weapon_url_name={slug}&sort_by=price_asc")
+
+
+def rivens_payload(state: AppState) -> Dict[str, Any]:
+    """The user's riven mods, each with the bottom of the market for its weapon as it was asked last.
+
+    No request for prices is made here: the page asks for them weapon by weapon (riven_price) when
+    the user says so, because these requests are the scarce kind -- 10 a minute by the site's rules.
+    """
+    data = rivens.load()
+    out: Dict[str, Any] = {"updated_at": data["updated_at"], "rivens": [], "unknown": data["unknown"], "error": "",
+                           "ttl": config.TTL_RIVEN_OFFERS, "interval": config.WFM_CONTRACT_MIN_INTERVAL}
+    if not data["items"]:
+        return out
+    weapons = None
+    try:
+        weapons = state.riven_weapons()
+    except FetchError as exc:
+        out["error"] = str(exc)
+    for it in data["items"]:
+        w = weapons.by_slug.get(it["weapon"]) if weapons else None
+        row: Dict[str, Any] = {
+            "weapon": it["weapon"], "name": it["name"],
+            "title": w["name"] if w else it["weapon"], "title_en": w["en"] if w else "",
+            "thumb": w["thumb"] if w else "", "group": w["group"] if w else "",
+            "market_url": riven_market_url(it["weapon"]),
+            "asked": False, "orders_at": None, "listed": 0,
+            "floor": None, "floor_live": None, "offers": 0, "live": 0, "cheapest": [],
+        }
+        hit = state.wfm.riven_offers_cached(it["weapon"])
+        if hit:
+            row.update(analysis.riven_floor(hit[0].get("offers") or []))
+            row.update(asked=True, orders_at=hit[1], listed=int(hit[0].get("listed") or 0))
+        out["rivens"].append(row)
+    return out
+
+
+def riven_price(state: AppState, slug: str, force: bool = False) -> Dict[str, Any]:
+    """Ask the market what the riven mods of one weapon are offered for (one request of the scarce
+    kind, through its own limiter), then give the whole list again."""
+    if not any(it["weapon"] == slug for it in rivens.load()["items"]):
+        raise KeyError(slug)
+    error = ""
+    try:
+        state.wfm.riven_offers(slug, force=force)
+    except FetchError as exc:
+        error = str(exc)
+    out = rivens_payload(state)
+    out["price_error"] = error
+    return out
+
+
+# --------------------------------------------------------------------------- relics
+def relics_payload(state: AppState) -> Dict[str, Any]:
+    """The user's relics, each with what refining it to radiant gives, ranked by that.
+
+    Prices are the ones the app already holds, however old; the page asks for the missing and the
+    outdated ones relic by relic (relic_prices) when the user says so.
+    """
+    data = relics.load()
+    out: Dict[str, Any] = {"updated_at": data["updated_at"], "relics": [], "unknown": data["unknown"], "error": "",
+                           "ttl": config.TTL_RELIC_PRICES, "min_interval": config.WFM_MIN_INTERVAL, "need": 0,
+                           "weights": analysis.RELIC_STATUS_WEIGHT,
+                           "chances": {level: dict(zip(analysis.RELIC_TIERS, row))
+                                       for level, row in analysis.RELIC_CHANCES.items()}}
+    if not data["items"]:
+        return out
+    index = None
+    try:
+        index = state.relic_index()
+    except FetchError as exc:
+        out["error"] = str(exc)
+    known: Dict[str, Any] = {}
+    needed = set()
+    now = time.time()
+
+    def price_of(slug: str) -> Any:
+        if slug not in known:
+            hit = state.wfm.top_orders_cached(slug)
+            known[slug] = (analysis.price_from_orders(hit[0]), hit[1]) if hit else None
+        return known[slug]
+
+    for it in data["items"]:
+        info = index.relics.get(it["relic"]) if index else None
+        row: Dict[str, Any] = {
+            "relic": it["relic"], "refinement": it["refinement"], "count": it["count"],
+            "title": info["name"] if info else it["relic"], "era": info["era"] if info else it["relic"].split()[0].lower(),
+            "thumb": info["thumb"] if info else "", "status": info["status"] if info else "unknown",
+            "market_url": market_url(info["slug"]) if info else "",
+            "rewards": [], "need": 0, "complete": False, "value": None, "rank": None, "oldest_at": None,
+        }
+        missing = 0
+        for rw in info["rewards"] if info else []:
+            reward = {"name": rw["name"], "tier": rw["tier"], "slug": rw["slug"], "thumb": rw["thumb"],
+                      "price": None, "basis": None, "asked": rw["slug"] is None}
+            if rw["slug"]:
+                got = price_of(rw["slug"])
+                if got:
+                    reward.update(price=got[0]["value"], basis=got[0]["basis"], asked=True)
+                    row["oldest_at"] = got[1] if row["oldest_at"] is None else min(row["oldest_at"], got[1])
+                else:
+                    missing += 1
+                if not got or now - got[1] > config.TTL_RELIC_PRICES:
+                    row["need"] += 1
+                    needed.add(rw["slug"])
+            row["rewards"].append(reward)
+        row["complete"] = bool(row["rewards"]) and missing == 0
+        if row["complete"]:
+            value = analysis.relic_gain(row["rewards"], it["refinement"], row["status"])
+            row["value"] = {k: round(v, 2) if isinstance(v, float) else v for k, v in value.items()} if value else None
+        out["relics"].append(row)
+    worth = [r for r in out["relics"] if r["value"] and r["refinement"] != "radiant" and r["value"]["gain"] > 0]
+    worth.sort(key=lambda r: (-r["value"]["score"], -r["value"]["radiant"], r["title"]))
+    for place, row in enumerate(worth, 1):
+        row["rank"] = place
+    out["need"] = len(needed)
+    return out
+
+
+def relic_prices(state: AppState, key: str, force: bool = False) -> Dict[str, Any]:
+    """Ask the market for the prices of what one relic holds -- only those the app does not have yet
+    or has had for too long -- then give the whole list again."""
+    info = state.relic_index().relics.get(key)
+    if info is None:
+        raise KeyError(key)
+    errors = []
+    for rw in info["rewards"]:
+        if not rw["slug"]:
+            continue
+        hit = state.wfm.top_orders_cached(rw["slug"])
+        # "anew" still spares what was asked a few minutes ago: relics share their rewards, and a
+        # whole pass over the list would otherwise ask about the same part several times
+        if hit and time.time() - hit[1] <= (config.TTL_TOP_ORDERS if force else config.TTL_RELIC_PRICES):
+            continue
+        try:
+            state.wfm.top_orders(rw["slug"], force=True)
+        except FetchError as exc:
+            errors.append(f"{rw['slug']}: {exc}")
+    out = relics_payload(state)
+    out["price_errors"] = errors
     return out
 
 
@@ -940,6 +1170,30 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/collection":
                 st.ensure_catalog()
                 return self._json(collection(st))
+            if path == "/api/rivens":
+                return self._json(rivens_payload(st))
+            if path == "/api/rivens/price":
+                slug = (q.get("slug") or [""])[0]
+                if not valid_slug(slug):
+                    return self._error(400, "bad slug")
+                return self._json(riven_price(st, slug, (q.get("force") or ["0"])[0] == "1"))
+            if path == "/api/relics":
+                return self._json(relics_payload(st))
+            if path == "/api/relics/prices":
+                key = (q.get("relic") or [""])[0]
+                if not re.fullmatch(r"\w+ \w+", key):
+                    return self._error(400, "bad relic")
+                try:
+                    return self._json(relic_prices(st, key, (q.get("force") or ["0"])[0] == "1"))
+                except FetchError as exc:
+                    return self._error(502, str(exc))
+            if path == "/api/scan":
+                kind = (q.get("kind") or [""])[0]
+                if kind not in scans.KINDS:
+                    return self._error(400, "bad kind")
+                return self._json(st.scan_state(kind, (q.get("refresh") or ["0"])[0] == "1"))
+            if path == "/api/scan/thumb":
+                return self._scan_thumb((q.get("kind") or [""])[0], (q.get("name") or [""])[0])
             if path == "/api/tile":
                 return self._tile((q.get("name") or [""])[0], (q.get("row") or [""])[0], (q.get("col") or [""])[0])
             if path == "/api/history":
@@ -1077,6 +1331,29 @@ class Handler(BaseHTTPRequestHandler):
                 raw = payload.get("exclude")
                 exclude = [str(x)[:200] for x in raw][:2000] if isinstance(raw, list) else []
                 return self._json(ducat_plan(st, target, exclude))
+            if path.startswith("/api/scan/"):
+                return self._scan(path, payload)
+            if path in ("/api/rivens/remove", "/api/rivens/add", "/api/rivens/forget-unknown"):
+                weapon, name = str(payload.get("weapon") or ""), str(payload.get("name") or "")
+                if path == "/api/rivens/remove":
+                    rivens.remove(weapon, name)
+                elif path == "/api/rivens/add":          # a mod taken off the list by mistake comes back
+                    try:
+                        known = weapon in st.riven_weapons().by_slug
+                    except FetchError:
+                        known = valid_slug(weapon)       # the market is silent: the name is at least well-formed
+                    if not known or not rivens.tidy(name):
+                        raise ValueError(tr("Такого мода в списке нет"))
+                    rivens.store([{"weapon": weapon, "name": name}], mode="merge")
+                else:
+                    rivens.forget_unknown()
+                return self._json({"list": rivens_payload(st), "overview": overview(st)})
+            if path in ("/api/relics/set", "/api/relics/forget-unknown"):
+                if path == "/api/relics/set":
+                    relics.set_count(str(payload.get("relic") or ""), str(payload.get("refinement") or ""), payload.get("count"))
+                else:
+                    relics.forget_unknown()
+                return self._json({"list": relics_payload(st), "overview": overview(st)})
             if path.startswith("/api/recognize/") or path in ("/api/screenshots/remove", "/api/screenshots/from-game"):
                 return self._recognize(path, payload)
             if path == "/api/settings" or path.startswith("/api/settings/"):
@@ -1197,6 +1474,76 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": str(exc), "code": exc.code}, 409)
         return self._json(st.recognition_state(refresh=path == "/api/recognize/login"))
 
+    def _scan(self, path: str, payload: Dict[str, Any]) -> None:
+        """The dialog that reads screenshots of riven mods or of relics (scans.py)."""
+        st = self.state
+        kind = str(payload.get("kind") or "")
+        if kind not in scans.KINDS:
+            return self._error(400, "bad kind")
+        job = st.scans.get(kind)
+        running = bool(job and job.state == "running")
+        try:
+            if path == "/api/scan/start":
+                st.start_scan(kind)
+            elif path == "/api/scan/cancel":
+                if job:
+                    job.cancel()
+            elif path == "/api/scan/dismiss":
+                if job and not running:
+                    st.scans.pop(kind, None)
+            elif path == "/api/scan/login":
+                providers.current().login()
+            elif path == "/api/scan/apply":
+                if not job:
+                    raise recognize.RecognizeError(tr("Нет результата распознавания"), "state")
+                skip = payload.get("skip") if isinstance(payload.get("skip"), list) else []
+                demo.switch(False)
+                result = job.apply("merge" if payload.get("mode") == "merge" else "replace",
+                                   [n for n in skip if isinstance(n, int) and not isinstance(n, bool)])
+                st.scans.pop(kind, None)
+                return self._json({"ok": True, "result": result, "scan": st.scan_state(kind), "overview": overview(st),
+                                   "list": rivens_payload(st) if kind == "rivens" else relics_payload(st)})
+            elif path in ("/api/scan/from-game", "/api/scan/remove"):
+                if running:
+                    raise recognize.RecognizeError(tr("Дождитесь конца распознавания"), "busy")
+                if path == "/api/scan/from-game":
+                    if payload.get("skip"):
+                        shots.game_mark_seen()
+                    else:
+                        shots.game_import(dest=scans.inbox(kind))
+                else:
+                    one = scans.find(kind, str(payload.get("name") or ""))
+                    gone = scans.files(kind) if payload.get("all") else [one] if one else []
+                    if gone:
+                        shots.archive(gone, label=f"{kind}-removed")
+                st.scans.pop(kind, None)         # a reading waiting for a decision no longer matches the folder
+            else:
+                return self._error(404, "not found")
+        except recognize.RecognizeError as exc:
+            return self._json({"error": str(exc), "code": exc.code}, 409)
+        return self._json(st.scan_state(kind, refresh=path == "/api/scan/login"))
+
+    def _scan_thumb(self, kind: str, name: str) -> None:
+        target = scans.find(kind, name) if kind in scans.KINDS else None
+        if not target:
+            return self._error(404, "no such screenshot")
+        try:
+            key = (kind, target.name, target.stat().st_mtime_ns)
+        except OSError:
+            return self._error(404, "no such screenshot")
+        cache = self.state._thumbs
+        data = cache.get(key)
+        if data is None:
+            data = shots.thumbnail(target)
+            if data:
+                if len(cache) > 400:
+                    cache.clear()
+                cache[key] = data
+        if data:
+            return self._send(200, data, "image/jpeg", {"Cache-Control": "private, max-age=300"})
+        ctype = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+        self._send(200, target.read_bytes(), ctype, {"Cache-Control": "private, max-age=300"})
+
     def _thumb(self, name: str, large: bool = False) -> None:
         target = shots.find(name)
         if not target:
@@ -1247,15 +1594,19 @@ class Handler(BaseHTTPRequestHandler):
         ext = os.path.splitext(name)[1].lower()
         if ext not in SCREENSHOT_EXT:
             return self._error(400, tr("Подходят только картинки: png, jpg, webp, bmp"))
+        kind = (q.get("kind") or [""])[0]          # "" -- the inventory; otherwise the inbox of riven mods or of relics
+        if kind and kind not in scans.KINDS:
+            return self._error(400, "bad kind")
         data = self._body(MAX_SCREENSHOT)
         if not data:
             return self._error(400, tr("Пустой файл"))
-        config.SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
-        target = config.SCREENSHOT_DIR / name
+        folder = scans.inbox(kind) if kind else config.SCREENSHOT_DIR
+        folder.mkdir(parents=True, exist_ok=True)
+        target = folder / name
         stem, n = os.path.splitext(name)[0], 1
         while target.exists():
             n += 1
-            target = config.SCREENSHOT_DIR / f"{stem} ({n}){ext}"
+            target = folder / f"{stem} ({n}){ext}"
         target.write_bytes(data)
         return self._json({"ok": True, "name": target.name, "files": list_screenshots()})
 

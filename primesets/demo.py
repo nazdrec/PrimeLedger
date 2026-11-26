@@ -1,10 +1,10 @@
 """A made-up inventory, to look at the program before one's own list is added.
 
 It is shown only while the user asks for it and is never written to the disk: the real inventory,
-the mastery marks, the history and the journal of sales stay as they are, and every change is
-refused while the example is on.  After a restart the example is off again.
+the mastery marks, the riven mods, the relics, the history and the journal of sales stay as they
+are, and every change is refused while the example is on.  After a restart the example is off again.
 
-The parts below are invented; nobody's account looks like this.
+The parts, riven mods and relics below are invented; nobody's account looks like this.
 """
 from __future__ import annotations
 
@@ -48,6 +48,18 @@ MASTERY: Dict[str, str] = {
     "akstiletto_prime_set": "mastered", "nikana_prime_set": "mastered", "carrier_prime_set": "mastered",
     "odonata_prime_set": "mastered", "tigris_prime_set": "owned",
 }
+
+# riven mods of the example: (weapon, the mod's own name)
+RIVENS = [
+    ("soma", "Crita-visitis"), ("latron", "Sati-toxidra"), ("boar", "Vexi-hexatron"), ("tatsu", "Visi-critatis"),
+    ("akarius", "Igni-satidra"), ("fragor", "Crita-vexitis"), ("ocucor", "Acri-satitio"), ("hate", "Visi-croniata"),
+]
+
+# void relics of the example: (relic, refinement, how many)
+RELICS = [
+    ("Lith A13", "intact", 6), ("Lith B7", "intact", 3), ("Meso K9", "flawless", 1), ("Neo N21", "intact", 2),
+    ("Neo F3", "radiant", 1), ("Axi A22", "intact", 2), ("Axi D6", "exceptional", 1), ("Axi S21", "intact", 1),
+]
 
 _since: Optional[str] = None
 

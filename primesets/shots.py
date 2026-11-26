@@ -217,13 +217,15 @@ def game_new() -> Dict[str, Any]:
     return {"dir": str(folder), "exists": folder.is_dir(), "files": files, "since": since}
 
 
-def game_import(only: Optional[List[Path]] = None) -> List[Path]:
+def game_import(only: Optional[List[Path]] = None, dest: Optional[Path] = None) -> List[Path]:
     """Copy the new game screenshots into the inbox (in the order they were taken) and remember where we stopped.
 
     only -- take just these of the new files (the live check gives the ones that are written to the end).
+    dest -- another inbox: the screenshots of riven mods and of relics have folders of their own (scans.py).
     """
     info = game_new()
-    config.SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    folder = dest or config.SCREENSHOT_DIR
+    folder.mkdir(parents=True, exist_ok=True)
     copied: List[Path] = []
     newest = info["since"]
     wanted = None if only is None else {str(f) for f in only}
@@ -231,7 +233,7 @@ def game_import(only: Optional[List[Path]] = None) -> List[Path]:
         if wanted is not None and str(src) not in wanted:
             continue
         stamp = datetime.fromtimestamp(src.stat().st_mtime).strftime("%Y%m%d-%H%M%S")
-        dst = config.SCREENSHOT_DIR / f"game-{stamp}-{src.stem}{src.suffix.lower()}"
+        dst = folder / f"game-{stamp}-{src.stem}{src.suffix.lower()}"
         if not dst.exists():
             shutil.copy2(src, dst)
         copied.append(dst)

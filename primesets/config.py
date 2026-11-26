@@ -43,6 +43,9 @@ WFM_ASSETS = "https://warframe.market/static/assets/"
 # Terms of Service, section 11 "API": no more than 3 requests per second.
 # We stay well below: one request at a time, at most 2 per second.
 WFM_MIN_INTERVAL = 0.5
+# Riven mods are sold on the site as "contracts" (auctions), and the same section gives them a limit
+# of their own: no more than 10 requests per minute.  One request in 8 seconds stays below it.
+WFM_CONTRACT_MIN_INTERVAL = 8.0
 ASSET_MIN_INTERVAL = 0.25
 PLATFORM = "pc"
 
@@ -61,6 +64,9 @@ TTL_DROPTABLES = 24 * 3600     # DE updates the page with game updates
 TTL_TOP_ORDERS = 10 * 60       # live sell/buy orders
 TTL_STATISTICS = 6 * 3600      # daily closed-deal statistics
 TTL_CATALOG = 24 * 3600        # derived catalog (sets + vault status)
+TTL_RIVEN_WEAPONS = 24 * 3600  # the weapons a riven mod can be for, with their names
+TTL_RIVEN_OFFERS = 60 * 60     # the cheapest riven mods offered for a weapon: asked sparingly (see above)
+TTL_RELIC_PRICES = 6 * 3600    # prices of what a relic holds: fresh enough to rank the relics by
 
 # --- local server ----------------------------------------------------------
 HOST = "127.0.0.1"

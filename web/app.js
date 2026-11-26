@@ -157,7 +157,8 @@ const S = {
   allParts: null,
   tab: "complete",
   query: "",
-  sort: { complete: { key: "price", dir: "desc" }, partial: { key: "missing", dir: "asc" }, ducats: { key: "rate", dir: "desc" } },
+  sort: { complete: { key: "price", dir: "desc" }, partial: { key: "missing", dir: "asc" }, ducats: { key: "rate", dir: "desc" },
+    rivens: { key: "floor", dir: "desc" } },
   nearFilter: "all",
   open: new Set(),
   tableView: new Set(),
@@ -166,7 +167,7 @@ const S = {
   buyQueue: { running: false, done: 0, total: 0, gen: 0 },
   partsQueue: { running: false, done: 0, total: 0, gen: 0 },
 };
-const TABS = ["complete", "partial", "parts", "ducats", "collection"];
+const TABS = ["complete", "partial", "parts", "ducats", "collection", "rivens", "relics"];
 try {
   const saved = localStorage.getItem("primesets-tab");
   if (TABS.includes(saved)) S.tab = saved;
@@ -1054,6 +1055,589 @@ function viewCollection() {
     list.length ? h("div", { class: "col-grid" }, list.map(collectionTile)) : h("div", { class: "card empty small" }, h("p", null, t("Под этот фильтр ничего не подходит."))));
 }
 
+
+// ----------------------------------------------------------------- riven mods: the bottom of the market for each of them
+/* The list comes from screenshots of the mod list (the dialog further down).  A price here is what the
+   cheapest riven mods of the same weapon are offered for on warframe.market.  Those requests are of the
+   scarce kind -- the site's rules allow 10 a minute -- so the server lets one through in 8 seconds and
+   keeps the answers for an hour. */
+const RV = { data: null, error: "", stale: true, loading: false, queue: { running: false, done: 0, total: 0, gen: 0 } };
+const RIVEN_GROUP = { primary: t("Основное оружие"), secondary: t("Вторичное оружие"), melee: t("Ближний бой"), zaw: t("Зо"),
+  kitgun: t("Китган"), archgun: t("Арч-пушка"), sentinel: t("Оружие стража") };
+const nf1 = new Intl.NumberFormat(LOCALE, { maximumFractionDigits: 1, minimumFractionDigits: 1 });
+const one = (n) => nf1.format(n);              // a number with one decimal: platinum of one opening, a chance
+async function loadRivens() {
+  if (RV.loading) return;
+  RV.loading = true;
+  RV.stale = false;
+  try { RV.data = await api("/api/rivens"); RV.error = ""; }
+  catch (err) { RV.error = err.message; }
+  RV.loading = false;
+  if (S.tab === "rivens") renderView();
+}
+function rivenMatch(r) {
+  const q = fold(S.query.trim());
+  if (!q) return true;
+  const hay = fold([r.title, r.title_en, r.name, RIVEN_GROUP[r.group] || ""].join(" "));
+  return q.split(/\s+/).every((w) => hay.includes(w));
+}
+function sortRivens(list) {
+  const { key, dir } = S.sort.rivens;
+  const mul = dir === "asc" ? 1 : -1;
+  const byName = (a, b) => a.title.localeCompare(b.title, LOCALE) || a.name.localeCompare(b.name, LOCALE);
+  const num = (get) => (a, b) => {
+    const va = get(a), vb = get(b);
+    if (va == null && vb == null) return byName(a, b);
+    if (va == null) return 1;            // unknown prices always sink to the bottom
+    if (vb == null) return -1;
+    return (va - vb) * mul || byName(a, b);
+  };
+  return [...list].sort(key === "name" ? (a, b) => byName(a, b) * mul : key === "live" ? num((r) => r.floor_live) : num((r) => r.floor));
+}
+function applyExtraList(kind, res) {
+  // the answer of a change: the list of its kind anew and the overview with the numbers on the tabs
+  if (kind === "rivens") RV.data = res.list; else RL.data = res.list;
+  if (res.overview) S.data = res.overview;
+  render();
+}
+async function removeRiven(r) {
+  try { applyExtraList("rivens", await post("/api/rivens/remove", { weapon: r.weapon, name: r.name })); }
+  catch (err) { toast(err.message); return; }
+  toast(t("Мод убран из списка: {0}", r.title + " " + r.name), { label: t("Отменить"), run: async () => {
+    try { applyExtraList("rivens", await post("/api/rivens/add", { weapon: r.weapon, name: r.name })); } catch (err) { toast(err.message); }
+  } });
+}
+function rivenRow(r) {
+  const price = (value, none) => (value != null
+    ? h("div", { class: "price num" }, fmt(value), h("span", { class: "unit" }, t("пл")))
+    : h("span", { class: "dim" }, r.asked ? none : "—"));
+  return h("div", { class: "row extra-row" },
+    h("div", { class: "item" }, thumb(r.thumb),
+      h("div", { class: "item-text" },
+        h("div", { class: "item-title" }, h("span", { title: r.title_en }, r.title), h("span", { class: "riven-name" }, r.name)),
+        h("div", { class: "item-meta" }, RIVEN_GROUP[r.group] || ""))),
+    h("div", null, price(r.floor, t("нет предложений")),
+      r.cheapest.length > 1 ? h("div", { class: "sub num" }, t("дальше: {0}", r.cheapest.slice(1, 4).map(fmt).join(", "))) : null),
+    h("div", null, price(r.floor_live, t("никого в сети")),
+      r.asked && r.live ? h("div", { class: "sub num" }, tn("# продавец в сети|# продавца в сети|# продавцов в сети", r.live)) : null),
+    h("div", { class: "sub num" }, r.asked
+      ? [r.listed >= 100 ? t("объявлений: 100 и больше") : t("объявлений: {0}", r.offers), stampFmt.format(new Date(r.orders_at * 1000))].join(" · ")
+      : t("цена ещё не запрашивалась")),
+    h("div", { class: "extra-actions" },
+      h("a", { class: "btn subtle icon-only", href: r.market_url, target: "_blank", rel: "noopener",
+        title: t("Моды Разлома этого оружия на warframe.market"), "aria-label": t("Моды Разлома этого оружия на warframe.market") }, icon("external")),
+      h("button", { class: "btn subtle icon-only", title: t("Мода больше нет: убрать его из списка"), "aria-label": t("Убрать {0}", r.title + " " + r.name),
+        onclick: () => removeRiven(r) }, icon("close"))));
+}
+function unknownCaptions(kind, list) {
+  if (!list || !list.length) return null;
+  return h("div", { class: "callout" }, icon("alert"), h("div", null,
+    h("div", null, kind === "rivens"
+      ? t("В этих подписях не нашлось названия оружия — в список они не попали: {0}.", list.map(quoted).join(", "))
+      : t("Эти подписи не похожи на названия реликвий — в список они не попали: {0}.", list.map(quoted).join(", "))),
+    h("div", { class: "actions" }, h("button", { class: "btn subtle", onclick: async () => {
+      try { applyExtraList(kind, await post(`/api/${kind}/forget-unknown`)); } catch (err) { toast(err.message); }
+    } }, t("Понятно")))));
+}
+function extraEmpty(kind, title, text) {
+  const demo = S.data && S.data.demo;
+  return h("div", { class: "card empty" }, h("h2", null, title), h("p", null, text),
+    h("div", { class: "empty-actions" },
+      h("button", { class: "btn primary", disabled: demo, title: demo ? t("Сейчас показан пример. Уберите его, чтобы добавить своё.") : "",
+        onclick: () => openScanDialog(kind) }, icon("image"), h("span", null, t("Добавить по скриншоту")))));
+}
+function viewRivens() {
+  if (RV.stale && !RV.loading) loadRivens();
+  const d = RV.data;
+  if (!d) {
+    return RV.error ? h("div", { class: "card empty small" }, h("h2", null, t("Не удалось загрузить список модов")), h("p", null, RV.error),
+      h("button", { class: "btn subtle", onclick: () => { RV.error = ""; RV.stale = true; renderView(); } }, t("Повторить")))
+      : h("div", { class: "card" }, h("div", { class: "empty small" }, h("span", { class: "skeleton", style: "width:60%;height:18px" })));
+  }
+  if (!d.rivens.length) {
+    return h("div", null, unknownCaptions("rivens", d.unknown),
+      extraEmpty("rivens", t("Модов Разлома пока нет"), t("Сделайте в игре скриншот списка модов Разлома — приложение прочитает их и покажет, за сколько на warframe.market продают самые дешёвые моды для того же оружия.")));
+  }
+  const q = RV.queue;
+  const weapons = [...new Set(d.rivens.map((r) => r.weapon))];
+  const asked = d.rivens.filter((r) => r.asked);
+  const known = d.rivens.filter((r) => r.floor != null);
+  const total = known.reduce((a, r) => a + r.floor, 0);
+  const oldest = asked.reduce((a, r) => Math.min(a, r.orders_at), Infinity);
+  const now = Date.now() / 1000;
+  const due = [...new Set(d.rivens.filter((r) => !r.asked || now - r.orders_at > d.ttl).map((r) => r.weapon))];
+  const minutes = (n) => Math.max(1, Math.ceil(n * d.interval / 60));
+  let status;
+  if (q.running) status = t("Запрашиваю цены: один запрос в {0} секунд — правила warframe.market разрешают не больше 10 таких запросов в минуту. Осталось около {1} мин.", d.interval, minutes(q.total - q.done));
+  else if (!asked.length) status = t("Цены ещё не запрашивались. Нужно запросов: {0} — около {1} мин: правила warframe.market разрешают не больше 10 таких запросов в минуту.", weapons.length, minutes(weapons.length));
+  else status = t("Цены известны для {0} из {1} · самые старые от {2}.", asked.length, d.rivens.length, stampFmt.format(new Date(oldest * 1000)));
+  const demo = S.data && S.data.demo;
+  const tools = h("div", { class: "inv-tools" },
+    h("button", { class: "btn ghost", disabled: demo, title: demo ? t("Сейчас показан пример. Уберите его, чтобы добавить своё.") : "",
+      onclick: () => openScanDialog("rivens") }, icon("image"), h("span", null, t("Обновить по скриншотам"))),
+    h("button", { class: "btn " + (asked.length || q.running ? "ghost" : "primary"), onclick: () => (q.running ? stopRivenQueue() : runRivenQueue(false)) },
+      icon(q.running ? "close" : "refresh"),
+      h("span", null, q.running ? t("Остановить ({0} из {1})", q.done, q.total) : asked.length ? (due.length ? t("Обновить цены") : t("Цены свежие")) : t("Узнать низ рынка"))),
+    h("span", { class: "sub" }, status));
+  const list = sortRivens(d.rivens.filter(rivenMatch));
+  const card = h("div", { class: "card rivens" },
+    h("div", { class: "cols" },
+      sortButton("rivens", "name", t("Мод Разлома")),
+      sortButton("rivens", "floor", t("Низ рынка"), t("Самая низкая цена, за которую мод Разлома для этого оружия выставлен на warframe.market с выкупом. Продавец может быть не в сети.")),
+      sortButton("rivens", "live", t("В сети сейчас"), t("Самая низкая цена у продавцов, которые сейчас в игре или на сайте")),
+      h("span", null, t("Объявления")),
+      h("span")),
+    list.length ? list.map(rivenRow) : h("div", { class: "empty small" }, h("p", null, t("Ничего не найдено."))));
+  return h("div", null,
+    h("p", { class: "lead" }, known.length
+      ? t("Низ рынка для ваших модов Разлома: вместе {0} пл по самым дешёвым предложениям (модов с ценой: {1} из {2}). Это цена самого дешёвого мода для того же оружия, а не вашего мода с его характеристиками: удачный мод стоит дороже.", fmt(total), known.length, d.rivens.length)
+      : t("Низ рынка для ваших модов Разлома: за сколько на warframe.market выставлен самый дешёвый мод для того же оружия. Это не цена вашего мода с его характеристиками: удачный мод стоит дороже.")),
+    d.error ? h("div", { class: "callout" }, icon("alert"), h("div", null, t("warframe.market не ответил: {0}", d.error))) : null,
+    unknownCaptions("rivens", d.unknown),
+    tools, card);
+}
+function stopRivenQueue() { RV.queue.gen++; RV.queue.running = false; if (S.tab === "rivens") renderView(); }
+async function runRivenQueue(force) {
+  const q = RV.queue, d = RV.data;
+  if (!d || q.running) return;
+  const now = Date.now() / 1000;
+  const todo = [...new Set(d.rivens.filter((r) => force || !r.asked || now - r.orders_at > d.ttl).map((r) => r.weapon))];
+  if (!todo.length) { toast(t("Цены свежие: им меньше {0} минут.", Math.round(d.ttl / 60))); return; }
+  const gen = ++q.gen;
+  Object.assign(q, { running: true, done: 0, total: todo.length });
+  if (S.tab === "rivens") renderView();
+  for (const slug of todo) {
+    if (gen !== q.gen) return;
+    try {
+      const res = await api(`/api/rivens/price?slug=${slug}${force ? "&force=1" : ""}`);
+      if (gen !== q.gen) return;
+      RV.data = res;
+    } catch (err) { /* that weapon stays without a price */ }
+    q.done++;
+    if (S.tab === "rivens") renderView();
+  }
+  if (gen !== q.gen) return;
+  q.running = false;
+  if (S.tab === "rivens") renderView();
+}
+
+// ----------------------------------------------------------------- relics: which of them are worth refining to radiant
+/* The list comes from screenshots of the relic list.  What a relic holds is known from the official drop
+   tables; the prices of its rewards are the usual ones (the cheapest seller in the game), remembered for
+   hours and asked for relic by relic when the user says so. */
+const RL = { data: null, error: "", stale: true, loading: false, all: false, open: new Set(), queue: { running: false, done: 0, total: 0, gen: 0 } };
+const REFINEMENT = { intact: t("Нетронутая"), exceptional: t("Необычная"), flawless: t("Бесподобная"), radiant: t("Сияющая") };
+const RELIC_STATUS = {
+  missions: [t("падает в миссиях"), "", t("Эта реликвия сейчас выпадает в миссиях: её запас можно пополнить.")],
+  special: [t("особая"), "", t("В миссиях эта реликвия не выпадает, но warframe.market не считает её убранной в хранилище: обычно она из особого источника.")],
+  vaulted: [t("в хранилище"), " solid", t("Эта реликвия больше не выпадает: каждую стоит открывать с наибольшей пользой.")],
+  unknown: [t("нет данных"), " quiet", t("Нет данных таблиц дропа.")],
+};
+const REWARD_TIER = { common: t("обычная награда"), uncommon: t("необычная награда"), rare: t("редкая награда") };
+// rewards that are not traded have no name on the market: the two that stand in most relics are named here
+const REWARD_NAME = { "Forma Blueprint": t("Форма (чертёж)"), "2X Forma Blueprint": t("Форма (чертёж), 2 шт.") };
+const rewardName = (x) => (x.slug ? x.name : REWARD_NAME[x.name] || x.name);
+const relicKey = (r) => r.relic + "|" + r.refinement;
+async function loadRelics() {
+  if (RL.loading) return;
+  RL.loading = true;
+  RL.stale = false;
+  try { RL.data = await api("/api/relics"); RL.error = ""; }
+  catch (err) { RL.error = err.message; }
+  RL.loading = false;
+  if (S.tab === "relics") renderView();
+}
+function relicMatch(r) {
+  const q = fold(S.query.trim());
+  if (!q) return true;
+  const hay = fold([r.title, r.relic, REFINEMENT[r.refinement], ...r.rewards.map(rewardName)].join(" "));
+  return q.split(/\s+/).every((w) => hay.includes(w));
+}
+async function setRelicCount(r, count) {
+  try { applyExtraList("relics", await post("/api/relics/set", { relic: r.relic, refinement: r.refinement, count })); }
+  catch (err) { toast(err.message); }
+}
+function relicDetail(r) {
+  const d = RL.data;
+  const chance = (tier, level) => (d.chances[level] ? d.chances[level][tier] : null);
+  const list = h("div", { class: "parts" }, r.rewards.map((x) => {
+    const was = chance(x.tier, r.refinement), top = chance(x.tier, "radiant");
+    return h("div", { class: "part" },
+      thumb(x.thumb, true),
+      h("div", null,
+        h("div", { class: "part-name" }, rewardName(x)),
+        h("div", { class: "part-meta" }, h("span", { class: "dot tier-" + x.tier }), REWARD_TIER[x.tier] || "")),
+      h("div", { class: "have num" }, was == null || top == null ? "" : r.refinement === "radiant" ? pctOf(top) : t("{0} → {1}", pctOf(was), pctOf(top))),
+      h("div", { class: "part-price num" }, !x.slug ? h("span", { class: "dim", title: t("Этим не торгуют на warframe.market: в расчёте это ноль.") }, "—")
+        : x.price != null ? pl(x.price) : x.asked ? h("span", { class: "dim" }, t("нет предложений")) : h("span", { class: "dim" }, "?")));
+  }));
+  const v = r.value;
+  const totals = h("div", { class: "totals num" });
+  if (v) {
+    totals.append(h("span", null, t("За одно открытие сейчас: "), h("b", null, t("{0} пл", one(v.now)))));
+    if (r.refinement !== "radiant") {
+      totals.append(h("span", null, t("У сияющей: "), h("b", null, t("{0} пл", one(v.radiant)))),
+        h("span", null, t("Улучшение стоит: "), h("b", null, tn("# Отголосок Бездны|# Отголоска Бездны|# Отголосков Бездны", v.traces))));
+    }
+  } else if (r.rewards.length && !r.complete) {
+    totals.append(h("span", null, t("Цены наград известны не все: нажмите «Узнать цены наград».")));
+  } else if (r.rewards.length) {
+    totals.append(h("span", null, t("У этой реликвии необычный состав: для неё расчёт не делается.")));
+  }
+  return h("div", { class: "detail single" }, h("div", null,
+    h("div", { class: "panel" },
+      h("div", { class: "panel-title" }, h("span", null, t("Что внутри")),
+        h("span", null, r.refinement === "radiant" ? t("шанс каждой награды") : t("шанс каждой награды: сейчас → у сияющей"))),
+      r.rewards.length ? list : h("div", { class: "sub" }, t("Состав этой реликвии неизвестен: её нет в таблицах дропа.")),
+      totals.childNodes.length ? totals : null),
+    h("div", { class: "actions" },
+      r.market_url ? h("a", { class: "link", href: r.market_url, target: "_blank", rel: "noopener" }, icon("external"), t("Открыть на warframe.market")) : null,
+      h("span", { class: "sub" }, t("Количество:")),
+      h("span", { class: "stepper" },
+        h("button", { class: "step", "aria-label": t("Меньше"), title: r.count <= 1 ? t("Убрать реликвию из списка") : "", onclick: () => setRelicCount(r, r.count - 1) }, icon("minus")),
+        h("span", { class: "qty" }, String(r.count)),
+        h("button", { class: "step", "aria-label": t("Больше"), onclick: () => setRelicCount(r, r.count + 1) }, icon("plus"))))));
+}
+const pctOf = (n) => one(n) + " %";
+function relicRow(r) {
+  const key = relicKey(r);
+  const open = RL.open.has(key);
+  const rare = r.rewards.find((x) => x.tier === "rare");
+  const v = r.value;
+  const [label, cls, hint] = RELIC_STATUS[r.status] || RELIC_STATUS.unknown;
+  let gain;
+  if (r.refinement === "radiant") gain = h("span", { class: "chip good" }, icon("check"), t("уже сияющая"));
+  else if (v) {
+    gain = [h("div", { class: "price num" }, (v.gain >= 0 ? "+" : MINUS) + one(Math.abs(v.gain)), h("span", { class: "unit" }, t("пл"))),
+      h("div", { class: "sub num" }, tn("за # Отголосок Бездны|за # Отголоска Бездны|за # Отголосков Бездны", v.traces)),
+      v.traces === 100 ? null : h("div", { class: "sub num" }, t("на 100 Отголосков: {0}", one(v.per_100)))];
+  } else gain = h("span", { class: "dim" }, r.rewards.length && !r.complete ? t("нужны цены") : "—");
+  return h("div", { class: "row" + (open ? " open" : ""), "data-key": key },
+    h("button", { class: "row-head", "aria-expanded": String(open),
+      onclick: () => { if (open) RL.open.delete(key); else RL.open.add(key); renderView(); } },
+      h("div", { class: "item" },
+        h("span", { class: "relic-rank num" + (r.rank && r.rank <= 10 ? " best" : "") }, r.rank ? String(r.rank) : ""),
+        thumb(r.thumb),
+        h("div", { class: "item-text" },
+          h("div", { class: "item-title" }, h("span", null, r.title), r.count > 1 ? h("span", { class: "times", title: t("Таких реликвий: {0}", r.count) }, "×" + r.count) : null),
+          h("div", { class: "item-meta" }, REFINEMENT[r.refinement] || ""))),
+      h("div", { class: "c-vault", title: hint }, h("span", { class: "chip" + cls }, r.status === "vaulted" ? icon("lock") : null, label)),
+      h("div", { class: "c-rare" }, rare
+        ? [h("div", { class: "rare-name", title: rewardName(rare) }, rewardName(rare)),
+          !rare.slug ? h("div", { class: "sub", title: t("Этим не торгуют на warframe.market: в расчёте это ноль.") }, "—")
+            : h("div", { class: "sub num" }, rare.price != null ? pl(rare.price) : rare.asked ? t("нет предложений") : t("цена ещё не запрашивалась"))]
+        : h("span", { class: "dim" }, "—")),
+      h("div", { class: "c-open num" }, v ? [h("div", null, r.refinement === "radiant" ? t("{0} пл", one(v.now)) : t("{0} → {1} пл", one(v.now), one(v.radiant))),
+        h("div", { class: "sub" }, t("за одно открытие"))] : h("span", { class: "dim" }, "—")),
+      h("div", { class: "c-gain" }, gain),
+      h("span", { class: "chev" }, icon("chevron"))),
+    open ? relicDetail(r) : null);
+}
+function viewRelics() {
+  if (RL.stale && !RL.loading) loadRelics();
+  const d = RL.data;
+  if (!d) {
+    return RL.error ? h("div", { class: "card empty small" }, h("h2", null, t("Не удалось загрузить список реликвий")), h("p", null, RL.error),
+      h("button", { class: "btn subtle", onclick: () => { RL.error = ""; RL.stale = true; renderView(); } }, t("Повторить")))
+      : h("div", { class: "card" }, h("div", { class: "empty small" }, h("span", { class: "skeleton", style: "width:60%;height:18px" })));
+  }
+  if (!d.relics.length) {
+    return h("div", null, unknownCaptions("relics", d.unknown),
+      extraEmpty("relics", t("Реликвий пока нет"), t("Сделайте в игре скриншоты списка реликвий Бездны — приложение прочитает их и покажет, какие десять выгоднее всего улучшить до сияющих.")));
+  }
+  const q = RL.queue;
+  const ranked = d.relics.filter((r) => r.rank).sort((a, b) => a.rank - b.rank);
+  const rest = d.relics.filter((r) => !r.rank).sort((a, b) => a.title.localeCompare(b.title, LOCALE));
+  const priced = d.relics.filter((r) => r.complete).length;
+  const waiting = d.relics.filter((r) => r.need > 0);
+  const oldest = d.relics.reduce((a, r) => (r.oldest_at ? Math.min(a, r.oldest_at) : a), Infinity);
+  const minutes = (n) => Math.max(1, Math.ceil(n * d.min_interval / 60));
+  let status;
+  if (q.running) status = t("Запрашиваю цены наград: по одному запросу, не чаще двух в секунду.");
+  else if (d.need) status = t("Цены известны для {0} из {1} реликвий. Нужно запросов к warframe.market: {2} — около {3} мин.", priced, d.relics.length, d.need, minutes(d.need));
+  else status = Number.isFinite(oldest) ? t("Цены известны для {0} из {1} · самые старые от {2}.", priced, d.relics.length, stampFmt.format(new Date(oldest * 1000)))
+    : t("Цены известны для {0} из {1}.", priced, d.relics.length);
+  const demo = S.data && S.data.demo;
+  const tools = h("div", { class: "inv-tools" },
+    h("button", { class: "btn ghost", disabled: demo, title: demo ? t("Сейчас показан пример. Уберите его, чтобы добавить своё.") : "",
+      onclick: () => openScanDialog("relics") }, icon("image"), h("span", null, t("Обновить по скриншотам"))),
+    h("button", { class: "btn " + (d.need && !q.running ? "primary" : "ghost"), onclick: () => (q.running ? stopRelicQueue() : runRelicQueue(!d.need)) },
+      icon(q.running ? "close" : "refresh"),
+      h("span", null, q.running ? t("Остановить ({0} из {1})", q.done, q.total) : d.need ? t("Узнать цены наград") : t("Запросить цены заново"))),
+    h("div", { class: "seg" },
+      h("button", { "aria-pressed": String(!RL.all), onclick: () => { RL.all = false; renderView(); } }, t("Первые 10")),
+      h("button", { "aria-pressed": String(RL.all), onclick: () => { RL.all = true; renderView(); } }, t("Все ({0})", d.relics.length))),
+    h("span", { class: "sub" }, status));
+  const searching = Boolean(S.query.trim());
+  const shown = (RL.all || searching ? [...ranked, ...rest] : ranked.slice(0, 10)).filter(relicMatch);
+  const traces = ranked.slice(0, 10).reduce((a, r) => a + r.value.traces, 0);
+  const total = d.relics.reduce((a, r) => a + r.count, 0);
+  const card = h("div", { class: "card relics" },
+    h("div", { class: "cols" },
+      h("span", null, t("Реликвия")),
+      h("span", { title: t("Можно ли ещё добыть такую реликвию: по официальным таблицам дропа и данным warframe.market") }, t("Где взять")),
+      h("span", null, t("Редкая награда")),
+      h("span", { title: t("Сколько платины в среднем приносит одно открытие: цена каждой награды, умноженная на её шанс") }, t("Одно открытие")),
+      h("span", { title: t("Сколько платины улучшение до сияющей добавляет к каждому открытию. По этому числу — в пересчёте на 100 Отголосков Бездны и с поправкой на редкость самой реликвии — составлен порядок.") }, t("После Улучшения")),
+      h("span")),
+    shown.length ? shown.map(relicRow)
+      : h("div", { class: "empty small" }, h("p", null, searching ? t("Ничего не найдено.")
+        : d.need ? t("Чтобы составить список, нужны цены наград: нажмите «Узнать цены наград».") : t("Улучшать нечего: всё, что можно оценить, уже сияющее или не выигрывает от улучшения."))));
+  return h("div", null,
+    h("p", { class: "lead" }, t("Какие реликвии выгоднее всего улучшить до сияющих. Считается, сколько платины улучшение добавляет к одному открытию: у сияющей реликвии редкая награда выпадает в 10 % случаев вместо 2 %. Реликвии, которых уже не добыть, стоят в списке выше.")),
+    h("p", { class: "sub relic-sum" }, [tn("В списке # вид реликвий|В списке # вида реликвий|В списке # видов реликвий", new Set(d.relics.map((r) => r.relic)).size),
+      t("всего {0} шт.", fmt(total)),
+      ranked.length ? t("на первые {0} нужно Отголосков Бездны: {1}", Math.min(10, ranked.length), fmt(traces)) : null].filter(Boolean).join(" · ")),
+    d.error ? h("div", { class: "callout" }, icon("alert"), h("div", null, t("warframe.market не ответил: {0}", d.error))) : null,
+    unknownCaptions("relics", d.unknown),
+    tools, card,
+    !RL.all && !searching && d.relics.length > shown.length ? h("div", { class: "actions" },
+      h("button", { class: "btn subtle", onclick: () => { RL.all = true; renderView(); } }, t("Показать все реликвии ({0})", d.relics.length))) : null);
+}
+function stopRelicQueue() { RL.queue.gen++; RL.queue.running = false; if (S.tab === "relics") renderView(); }
+async function runRelicQueue(force) {
+  const q = RL.queue, d = RL.data;
+  if (!d || q.running) return;
+  // a relic listed at two refinements holds the same rewards: it is asked about once
+  const todo = [...new Set(d.relics.filter((r) => r.rewards.length && (force || r.need > 0)).map((r) => r.relic))];
+  if (!todo.length) { toast(t("Цены уже загружены.")); return; }
+  const gen = ++q.gen;
+  Object.assign(q, { running: true, done: 0, total: todo.length });
+  if (S.tab === "relics") renderView();
+  for (const key of todo) {
+    if (gen !== q.gen) return;
+    try {
+      const res = await api(`/api/relics/prices?relic=${encodeURIComponent(key)}${force ? "&force=1" : ""}`);
+      if (gen !== q.gen) return;
+      RL.data = res;
+    } catch (err) { /* that relic stays without its prices */ }
+    q.done++;
+    if (S.tab === "relics") renderView();
+  }
+  if (gen !== q.gen) return;
+  q.running = false;
+  if (S.tab === "relics") renderView();
+}
+
+// ----------------------------------------------------------------- riven mods and relics: reading their screenshots
+/* One dialog for both kinds.  The screenshots of a kind wait in a folder of their own, are read by the
+   connection chosen in the settings and come back as a list to look through before it is saved. */
+const SCAN = { kind: null, state: null, timer: 0, busy: false, mode: null, skip: new Set(), loginUntil: 0, gridKey: "", gridEl: null };
+const SCAN_TEXT = {
+  rivens: {
+    title: t("Моды Разлома по скриншотам"),
+    how: t("В игре откройте список модов так, чтобы моды Разлома были видны (поиск или сортировка), и нажмите F6. Если они не помещаются на один экран — пролистайте и снимите каждый экран. Лишние снимки уберите крестиком: каждый снимок читает нейросеть."),
+    whole: [t("Это все мои моды Разлома"), t("Модов, которых нет на скриншотах, в списке не останется.")],
+    add: [t("Только добавить"), t("Остальные моды в списке сохранятся как есть.")],
+    saved: t("Список модов Разлома сохранён"),
+  },
+  relics: {
+    title: t("Реликвии по скриншотам"),
+    how: t("В игре откройте «Инвентарь» → «Продать», выберите категорию «Реликвии» и нажимайте F6 на каждом экране списка. Листайте по три ряда: обрезанный нижний ряд должен стать верхним; если сомневаетесь, листайте меньше — повторы не мешают. Курсор держите справа от списка. Лишние снимки уберите крестиком: каждый снимок читает нейросеть."),
+    whole: [t("Это все мои реликвии"), t("Реликвий, которых нет на скриншотах, в списке не останется.")],
+    add: [t("Только добавить и обновить"), t("Остальные реликвии в списке сохранятся как есть.")],
+    saved: t("Список реликвий сохранён"),
+  },
+};
+async function refreshScan(force) {
+  if (!SCAN.kind) return;
+  try {
+    SCAN.state = await api(`/api/scan?kind=${SCAN.kind}${force ? "&refresh=1" : ""}`);
+  } catch (err) {
+    if (!SCAN.state) SCAN.state = { kind: SCAN.kind, provider: { id: "", kind: "", ready: false, reason: "error", error: err.message }, job: null, files: [], game: { new: 0 } };
+  }
+  renderScan();
+  scheduleScanPoll();
+}
+function scheduleScanPoll() {
+  clearTimeout(SCAN.timer);
+  const job = SCAN.state && SCAN.state.job;
+  const running = job && job.state === "running";
+  if (!$("#dlg-scan").open && !running) return;
+  if (running) SCAN.timer = setTimeout(() => refreshScan(false), 1000);
+  // after "Войти" keep checking for a few minutes, so the dialog notices the finished sign-in by itself
+  else if (Date.now() < SCAN.loginUntil && !(SCAN.state && SCAN.state.provider.ready)) SCAN.timer = setTimeout(() => refreshScan(true), 4000);
+}
+async function scanAction(path, payload) {
+  if (SCAN.busy) return null;
+  SCAN.busy = true;
+  try {
+    const res = await post(path, { kind: SCAN.kind, ...(payload || {}) });
+    if (res && res.scan) SCAN.state = res.scan; else if (res && res.provider) SCAN.state = res;
+    return res;
+  } catch (err) {
+    toast(err.message);
+    return null;
+  } finally {
+    SCAN.busy = false;
+    renderScan();
+    scheduleScanPoll();
+  }
+}
+function scanFiles(files, locked) {
+  if (!files.length) return h("div", { class: "sub" }, t("Скриншотов пока нет."));
+  const key = SCAN.kind + (locked ? "|L|" : "|U|") + files.map((f) => f.name + ":" + Math.round(f.mtime)).join("|");
+  if (SCAN.gridKey === key && SCAN.gridEl) return SCAN.gridEl;
+  SCAN.gridKey = key;
+  SCAN.gridEl = h("div", { class: "shots" }, files.map((f, i) => h("div", { class: "shot", title: f.name },
+    h("img", { src: `/api/scan/thumb?kind=${SCAN.kind}&name=${encodeURIComponent(f.name)}&v=${Math.round(f.mtime)}`, alt: "", loading: "lazy" }),
+    h("span", { class: "shot-n" }, String(i + 1)),
+    h("span", { class: "shot-name" }, f.name),
+    locked ? null : h("button", { class: "shot-x", "aria-label": t("Убрать {0}", f.name), title: t("Убрать из списка (файл переедет в папку _done)"),
+      onclick: () => scanAction("/api/scan/remove", { name: f.name }) }, icon("close")))));
+  return SCAN.gridEl;
+}
+function scanProgress(job) {
+  const found = (f) => (SCAN.kind === "rivens" ? tn("# мод|# мода|# модов", f.found) : tn("# реликвия|# реликвии|# реликвий", f.found));
+  return h("div", null,
+    h("div", { class: "bar-track" }, h("div", { class: "bar-fill", style: `width:${job.total ? Math.round(job.done / job.total * 100) : 0}%` })),
+    h("ul", { class: "joblist" }, job.files.map((f) => h("li", { class: "job-" + f.state },
+      f.state === "reading" ? icon("refresh", "spin") : f.state === "done" ? icon("check") : f.state === "error" ? icon("alert") : h("span", { class: "ico" }),
+      h("span", { class: "grow" }, f.name),
+      h("span", { class: "sub" }, f.state === "done" ? found(f) : f.state === "error" ? f.error : FILE_STATE[f.state] || "")))),
+    h("div", { class: "actions" },
+      h("button", { class: "btn ghost", onclick: () => scanAction("/api/scan/cancel") }, t("Отмена")),
+      h("span", { class: "sub" }, t("Прочитано {0} из {1}, обычно несколько секунд на скриншот.", job.done, job.total))));
+}
+function scanReview(job) {
+  const kind = SCAN.kind, text = SCAN_TEXT[kind], rev = job.review;
+  const stored = (S.data && S.data.extras && S.data.extras[kind]) || 0;
+  const kept = rev.entries.filter((e, i) => !SCAN.skip.has(i) && (kind === "rivens" ? e.weapon : e.relic));
+  // the whole list unless the reading is plainly a part of it
+  const suggested = !stored ? "replace" : kept.length < stored * 0.75 ? "merge" : "replace";
+  const mode = SCAN.mode || suggested;
+  const failed = job.files.filter((f) => f.state === "error");
+  const box = h("div", { class: "review" });
+  box.append(h("div", { class: "review-head" },
+    h("b", null, kind === "rivens" ? tn("Прочитан # мод Разлома|Прочитано # мода Разлома|Прочитано # модов Разлома", rev.matched)
+      : tn("Прочитана # строка: видов реликвий {0}|Прочитано # строки: видов реликвий {0}|Прочитано # строк: видов реликвий {0}", rev.matched, rev.kinds)),
+    h("span", { class: "sub" }, t("за {0} с", job.seconds))));
+  if (rev.other_screens.length) {
+    box.append(h("div", { class: "callout" }, icon("alert"), h("div", null, kind === "rivens"
+      ? t("На этих снимках нет модов Разлома: {0}.", rev.other_screens.join(", "))
+      : t("На этих снимках нет списка реликвий: {0}.", rev.other_screens.join(", ")))));
+  }
+  if (failed.length) {
+    box.append(h("div", { class: "callout" }, icon("alert"), h("div", null, t("Не удалось прочитать: {0}", failed.map((f) => `${f.name} (${f.error})`).join("; ")))));
+  }
+  if (job.notes && job.notes.length) {
+    box.append(h("details", { class: "review-sec" }, h("summary", null, t("Что не удалось разобрать на снимках")),
+      h("ul", null, job.notes.map((n) => h("li", null, n)))));
+  }
+  box.append(h("div", { class: "modes" }, [["replace", text.whole], ["merge", text.add]].map(([value, [title, sub]]) =>
+    h("button", { class: "mode", "aria-pressed": String(mode === value), onclick: () => { SCAN.mode = value; renderScan(); } },
+      h("b", null, title), h("span", { class: "sub" }, sub)))));
+  const line = (e, i) => {
+    const out = SCAN.skip.has(i);
+    const ok = kind === "rivens" ? e.weapon : e.relic;
+    let what, note = null;
+    if (!ok) {
+      what = h("span", { class: "dim" }, quoted(e.caption));
+      note = h("span", { class: "chip warn" }, kind === "rivens" ? t("оружие не найдено") : t("реликвия не найдена"));
+    } else if (kind === "rivens") {
+      what = [h("span", null, e.title), " ", h("span", { class: "riven-name" }, e.name)];
+      if (e.status === "fuzzy") note = h("span", { class: "chip warn", title: t("На снимке написано: {0}", e.caption) }, t("проверьте оружие"));
+    } else {
+      what = [h("span", null, e.title), " ", h("span", { class: "sub" }, REFINEMENT[e.refinement] || ""), " ", h("b", { class: "num" }, "×" + e.count)];
+      if (e.status === "count") note = h("span", { class: "chip warn" }, t("на двух снимках разное количество"));
+    }
+    return h("li", { class: "scan-line" + (out ? " out" : "") },
+      h("span", { class: "grow" }, what), note,
+      ok ? h("button", { class: "link-btn", onclick: () => { if (out) SCAN.skip.delete(i); else SCAN.skip.add(i); renderScan(); } }, out ? t("Вернуть") : t("Не заносить")) : null);
+  };
+  const problems = rev.entries.map((e, i) => [e, i]).filter(([e]) => e.status !== "ok");
+  const fine = rev.entries.map((e, i) => [e, i]).filter(([e]) => e.status === "ok");
+  if (problems.length) {
+    box.append(h("div", { class: "review-sec" }, h("b", null, t("Стоит взглянуть: {0}", problems.length)),
+      h("ul", { class: "scan-list" }, problems.map(([e, i]) => line(e, i)))));
+  }
+  box.append(h("details", { class: "review-sec", open: fine.length <= 30 }, h("summary", null, t("Прочитано без замечаний: {0}", fine.length)),
+    h("ul", { class: "scan-list" }, fine.map(([e, i]) => line(e, i)))));
+  box.append(h("div", { class: "actions" },
+    h("button", { class: "btn primary", disabled: !kept.length,
+      onclick: async () => {
+        const res = await scanAction("/api/scan/apply", { mode, skip: [...SCAN.skip] });
+        if (!res || !res.ok) return;
+        $("#dlg-scan").close();
+        S.tab = kind;
+        applyExtraList(kind, res);
+        toast(text.saved);
+      } }, icon("check"), kind === "rivens" ? tn("Сохранить # мод|Сохранить # мода|Сохранить # модов", kept.length) : tn("Сохранить # строку|Сохранить # строки|Сохранить # строк", kept.length)),
+    h("button", { class: "btn ghost", onclick: () => { SCAN.mode = null; SCAN.skip.clear(); scanAction("/api/scan/dismiss"); } }, t("Не сохранять"))));
+  return box;
+}
+function renderScan() {
+  const dlg = $("#dlg-scan");
+  if (!dlg.open || !SCAN.state) return;
+  const kind = SCAN.kind, text = SCAN_TEXT[kind];
+  const { job, files } = SCAN.state;
+  const provider = SCAN.state.provider || { id: "", kind: "", ready: false, reason: "error", error: "" };
+  const running = job && job.state === "running";
+  const review = job && job.state === "review";
+  const picker = h("input", { type: "file", accept: "image/*", multiple: true, hidden: true,
+    onclick: (e) => e.stopPropagation(), onchange: async (e) => { await uploadScreenshots(e.target.files, kind); refreshScan(false); } });
+  const drop = h("div", { class: "drop", role: "button", tabindex: "0",
+    onclick: () => picker.click(),
+    onkeydown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); picker.click(); } },
+    ondragover: (e) => { e.preventDefault(); drop.classList.add("over"); },
+    ondragleave: () => drop.classList.remove("over"),
+    ondrop: async (e) => { e.preventDefault(); e.stopPropagation(); drop.classList.remove("over"); await uploadScreenshots(e.dataTransfer.files, kind); refreshScan(false); },
+  }, h("b", null, t("Вставьте из буфера — Ctrl+V")), h("span", null, t("или перетащите файлы сюда, или нажмите, чтобы выбрать")), picker);
+  const game = SCAN.state.game || { new: 0, dir: "" };
+  const fromGame = !running && !review && game.new > 0
+    ? h("div", { class: "from-game" },
+        h("div", null, h("b", null, tn("В папке игры # новый скриншот|В папке игры # новых скриншота|В папке игры # новых скриншотов", game.new)),
+          h("div", { class: "sub" }, t("сделаны клавишей F6") + " · " + game.dir)),
+        h("button", { class: "btn primary", onclick: () => scanAction("/api/scan/from-game") }, t("Добавить")),
+        h("button", { class: "btn subtle", title: t("Не предлагать эти снимки"), onclick: () => scanAction("/api/scan/from-game", { skip: true }) }, t("Пропустить")))
+    : null;
+  let work;
+  if (running) work = scanProgress(job);
+  else if (review) work = scanReview(job);
+  else {
+    const count = files.length;
+    work = h("div", null,
+      job && job.state === "error" && job.error_code !== "login" ? h("div", { class: "callout" }, icon("alert"), h("div", null, job.error)) : null,
+      providerLine(provider, {
+        login: async () => { SCAN.loginUntil = Date.now() + 5 * 60000; await scanAction("/api/scan/login"); },
+        again: () => refreshScan(true),
+      }),
+      h("div", { class: "actions" },
+        h("button", { class: "btn primary", disabled: !count || !provider.ready,
+          onclick: () => { SCAN.mode = null; SCAN.skip.clear(); scanAction("/api/scan/start"); } },
+          icon("image"), count ? tn("Распознать # скриншот|Распознать # скриншота|Распознать # скриншотов", count) : t("Распознать")),
+        !count ? h("span", { class: "sub" }, t("Сначала добавьте скриншоты.")) : null));
+  }
+  const scroll = dlg.querySelector(".dlg-body") ? dlg.querySelector(".dlg-body").scrollTop : 0;
+  dlg.replaceChildren(
+    h("div", { class: "dlg-head" }, h("h2", null, text.title),
+      h("button", { class: "btn ghost icon-only", "aria-label": t("Закрыть"), onclick: () => dlg.close() }, icon("close"))),
+    h("div", { class: "dlg-body" },
+      h("ol", { class: "steps" },
+        h("li", null, h("div", null,
+          h("h3", null, t("Скриншоты из игры")),
+          h("p", null, text.how),
+          fromGame,
+          running || review ? null : drop,
+          scanFiles(files, running || review),
+          running || review || !files.length ? null : h("div", { class: "actions" },
+            h("button", { class: "btn subtle", onclick: () => scanAction("/api/scan/remove", { all: true }) }, t("Убрать все"))))),
+        h("li", null, h("div", null, h("h3", null, running ? t("Читаю скриншоты") : review ? t("Проверьте и сохраните") : t("Распознавание")), work))),
+      h("p", { class: "foot" }, t("Приложение не подключается к игре: оно видит только те картинки, которые вы сюда положили."))));
+  dlg.querySelector(".dlg-body").scrollTop = scroll;
+}
+async function openScanDialog(kind) {
+  // the example is a list of its own: the user's screenshots are not read into it
+  if (S.data && S.data.demo) { toast(t("Сейчас показан пример. Уберите его, чтобы добавить своё.")); return; }
+  const dlg = $("#dlg-scan");
+  if (SCAN.kind !== kind) { SCAN.kind = kind; SCAN.state = null; SCAN.mode = null; SCAN.skip.clear(); SCAN.gridKey = ""; SCAN.gridEl = null; }
+  if (!dlg.open) {
+    dlg.replaceChildren(h("div", { class: "dlg-head" }, h("h2", null, SCAN_TEXT[kind].title)),
+      h("div", { class: "dlg-body" }, h("span", { class: "skeleton", style: "width:100%;height:120px" })));
+    dlg.showModal();
+  }
+  await refreshScan(false);
+}
 
 // ----------------------------------------------------------------- ducats: which set is the cheapest way to ducats
 // Every set of the catalog, not only the owned ones: buy it whole, hand its parts in at the ducat kiosk.
@@ -2186,10 +2770,17 @@ function renderTabs() {
     ["parts", t("Все части"), d.inventory.distinct],
     ["ducats", t("Дукаты"), D.list ? D.list.length : null],
     ["collection", t("Коллекция"), null],
+    ["rivens", t("Моды Разлома"), (d.extras && d.extras.rivens) || null],
+    ["relics", t("Реликвии"), (d.extras && d.extras.relics) || null],
   ];
   $("#tabs").replaceChildren(...tabs.map(([id, label, count]) => h("button", {
     class: "tab", role: "tab", "aria-selected": String(S.tab === id),
-    onclick: () => { S.tab = id; S.open.clear(); try { localStorage.setItem("primesets-tab", id); } catch (e) { /* ignore */ } renderTabs(); renderView(); },
+    onclick: () => {
+      S.tab = id; S.open.clear();
+      try { localStorage.setItem("primesets-tab", id); } catch (e) { /* ignore */ }
+      renderTabs(); renderView();
+      $("#btn-prices").disabled = !S.data.complete.length && !["ducats", "rivens", "relics"].includes(id);
+    },
   }, label, count == null ? null : h("span", { class: "count num" }, String(count)))));
 }
 function renderStatus() {
@@ -2208,6 +2799,7 @@ async function setDemo(on) {
     S.data = await post("/api/demo", { on });
     S.parts.clear(); S.market.clear(); S.lite.clear();
     HIST.data = null;
+    RV.stale = RL.stale = true;
     render();
     queueMarket(false);
     checkChanges();
@@ -2314,6 +2906,12 @@ function renderLegend() {
       t("Вкладка «Дукаты»: сколько дукатов дают все части комплекта в киоске (стоимость частей в дукатах — из данных warframe.market), делённое на цену комплекта — ту же минимальную цену продавца в игре. Учтены все комплекты справочника, а не только ваши. Цены запрашиваются по кнопке: это по одному запросу на комплект.")),
     h("div", null, h("h3", null, t("Полный комплект и освоение")),
       t("Комплект считается по составу с warframe.market: если часть нужна в двух экземплярах, учитываются оба. Отметки «освоено» берутся с ваших скриншотов кузницы или профиля либо ставятся вручную — у Digital Extremes нет открытых данных об аккаунте.")),
+    h("div", null, h("h3", null, t("Моды Разлома")),
+      t("Низ рынка — самая низкая цена, за которую мод Разлома для того же оружия выставлен на warframe.market с выкупом; рядом — самая низкая у продавцов, которые сейчас в сети. Это не оценка вашего мода: его характеристики не учитываются. Запросы об этих объявлениях идут не чаще одного в {0} секунд (правила сайта разрешают 10 в минуту), ответы хранятся {1} минут.",
+        lim.contract_interval, Math.round(lim.ttl_rivens / 60))),
+    h("div", null, h("h3", null, t("Реликвии")),
+      t("Состав каждой реликвии — из официальных таблиц дропа Digital Extremes. Одно открытие оценивается как сумма цен наград, умноженных на их шансы: у нетронутой реликвии редкая награда выпадает в 2 % случаев, у сияющей — в 10 %. «После Улучшения» — на сколько платины сияющая реликвия приносит больше нынешней. Порядок в списке — по этому приросту в пересчёте на 100 Отголосков Бездны; реликвиям, которых уже не добыть, прибавляется {0} %, реликвиям из особых источников — {1} %. Награды, которыми не торгуют (Форма), считаются за ноль. Расчёт — для открытия в одиночку: в отряде, где у всех такая же сияющая реликвия, награду выбирают из четырёх, и выигрыш больше. Цены наград хранятся {2} часов.",
+        Math.round((lim.relic_weights.vaulted - 1) * 100), Math.round((lim.relic_weights.special - 1) * 100), Math.round(lim.ttl_relics / 3600))),
     h("div", { class: "wide" },
       t("Приложение не подключается к игре и ничего в ней не делает: оно работает с картинками, которые вы сделали сами, и с открытыми данными. "),
       t("Запросы к warframe.market идут по одному, не чаще {0} в секунду (правила сайта разрешают 3); цены хранятся {1} минут, статистика — {2} часов. ", Math.round(1 / lim.wfm_min_interval), Math.round(lim.ttl_orders / 60), Math.round(lim.ttl_stats / 3600)),
@@ -2331,13 +2929,13 @@ function renderView() {
     return;
   }
   view.replaceChildren(S.tab === "partial" ? viewPartial() : S.tab === "parts" ? viewParts() : S.tab === "ducats" ? viewDucats()
-    : S.tab === "collection" ? viewCollection() : viewComplete());
+    : S.tab === "collection" ? viewCollection() : S.tab === "rivens" ? viewRivens() : S.tab === "relics" ? viewRelics() : viewComplete());
 }
 function render() {
   if (!S.data) return;
   C.stale = true;                     // the inventory or the mastery marks may have changed: the collection is asked for anew
   renderStatus(); renderBanners(); renderTiles(); renderTabs(); renderView(); renderLegend();
-  $("#btn-prices").disabled = !S.data.complete.length && S.tab !== "ducats";
+  $("#btn-prices").disabled = !S.data.complete.length && !["ducats", "rivens", "relics"].includes(S.tab);
 }
 
 // ----------------------------------------------------------------- market queue
@@ -2383,7 +2981,8 @@ async function queueMarket(force) {
 
 // ----------------------------------------------------------------- update dialog
 const pad2 = (n) => String(n).padStart(2, "0");
-async function uploadScreenshots(list) {
+async function uploadScreenshots(list, kind) {
+  // kind -- "rivens" or "relics": the screenshot goes to the inbox of that list, not to the inventory's
   const pics = [...list].filter((f) => /\.(png|jpe?g|webp|bmp)$/i.test(f.name) || /^image\//.test(f.type || ""));
   if (!pics.length) { toast(t("Подходят только картинки: png, jpg, webp.")); return 0; }
   let ok = 0;
@@ -2397,7 +2996,7 @@ async function uploadScreenshots(list) {
       name = `screenshot-${stamp}${pics.length > 1 ? "-" + (i + 1) : ""}.${ext}`;
     }
     try {
-      await api("/api/screenshot?name=" + encodeURIComponent(name), { method: "POST", headers: { "X-Requested-With": "primesets" }, body: f });
+      await api("/api/screenshot?name=" + encodeURIComponent(name) + (kind ? "&kind=" + kind : ""), { method: "POST", headers: { "X-Requested-With": "primesets" }, body: f });
       ok++;
     } catch (err) { toast(`${name}: ${err.message}`); }
   }
@@ -2456,7 +3055,12 @@ const PROVIDER = {
   deepseek_api: { title: "DeepSeek API", kind: t("API-ключ DeepSeek") },
   gemini_api: { title: "Gemini API", kind: t("API-ключ Google") },
 };
-function providerLine(p) {
+function providerLine(p, hooks) {
+  // hooks -- what "sign in" and "check again" do in the dialog the line stands in
+  const act = hooks || {
+    login: async () => { R.loginUntil = Date.now() + 5 * 60000; await recognizeAction("/api/recognize/login"); },
+    again: () => refreshRecognize(true),
+  };
   const meta = PROVIDER[p.id] || { title: p.id || "?", kind: "" };
   const settings = (label, primary) => h("button", { class: primary ? "btn primary" : "btn subtle", onclick: () => openSettingsDialog() }, label);
   if (p.ready) {
@@ -2475,8 +3079,8 @@ function providerLine(p) {
   } else if (p.reason === "login") {
     text = t("Нужен разовый вход в {0} — своим аккаунтом. Откроется окно с командой входа и браузер; пароль приложение не видит.", meta.title);
     buttons = [
-      h("button", { class: "btn primary", onclick: async () => { R.loginUntil = Date.now() + 5 * 60000; await recognizeAction("/api/recognize/login"); } }, meta.login || t("Войти")),
-      h("button", { class: "btn subtle", onclick: () => refreshRecognize(true) }, icon("refresh"), t("Проверить снова")),
+      h("button", { class: "btn primary", onclick: act.login }, meta.login || t("Войти")),
+      h("button", { class: "btn subtle", onclick: act.again }, icon("refresh"), t("Проверить снова")),
       settings(t("Другое подключение"), false)];
   } else if (p.reason === "no_key") {
     text = t("Для подключения «{0}» нужен ваш API-ключ: введите его в настройках. Ключ хранится только на этом компьютере, в зашифрованном виде.", meta.title);
@@ -2485,7 +3089,7 @@ function providerLine(p) {
     text = t("Для Claude API нужна библиотека anthropic: выполните «pip install anthropic» или пользуйтесь готовым exe.");
   } else {
     text = p.error || t("Подключение для распознавания не настроено.");
-    buttons = [h("button", { class: "btn subtle", onclick: () => refreshRecognize(true) }, icon("refresh"), t("Проверить снова")), settings(t("Открыть настройки"), false)];
+    buttons = [h("button", { class: "btn subtle", onclick: act.again }, icon("refresh"), t("Проверить снова")), settings(t("Открыть настройки"), false)];
   }
   return h("div", { class: "callout" }, icon("alert"), h("div", null, h("div", null, text), h("div", { class: "actions" }, buttons)));
 }
@@ -3109,9 +3713,10 @@ async function openSettingsDialog() {
   const dlg = $("#dlg-settings");
   if (!dlg.open) {
     // one dialog at a time: the settings can be reached from the dialog of the screenshots
-    const other = $("#dlg-update");
-    SET.back = other.open;
+    const other = $("#dlg-update"), scan = $("#dlg-scan");
+    SET.back = other.open ? "update" : scan.open ? "scan" : false;
     if (other.open) other.close();
+    if (scan.open) scan.close();
     dlg.showModal();
     renderSettings();
   }
@@ -3237,7 +3842,9 @@ $("#btn-settings").addEventListener("click", () => openSettingsDialog());
 $("#dlg-settings").addEventListener("click", (e) => { if (e.target === e.currentTarget) e.currentTarget.close(); });
 $("#dlg-settings").addEventListener("close", () => {
   clearTimeout(SET.timer);
-  if (SET.back) { SET.back = false; openUpdateDialog(); }       // back to the screenshots the settings were opened from
+  // back to the screenshots the settings were opened from
+  if (SET.back === "scan") { SET.back = false; openScanDialog(SCAN.kind).then(() => refreshScan(true)); }
+  else if (SET.back) { SET.back = false; openUpdateDialog(); }
 });
 for (const id of ["#dlg-history", "#dlg-listing", "#dlg-sellnow", "#dlg-goal", "#dlg-baro", "#dlg-sell"]) {
   $(id).addEventListener("click", (e) => { if (e.target === e.currentTarget) e.currentTarget.close(); });
@@ -3249,21 +3856,42 @@ $("#dlg-settings").addEventListener("close", () => { if ($("#dlg-welcome").open)
 $("#dlg-history").addEventListener("close", renderChangesBanner);
 $("#btn-prices").addEventListener("click", () => {
   if (S.tab === "ducats") { if (!D.queue.running) runDucatQueue(true); return; }
+  if (S.tab === "rivens") { if (!RV.queue.running) runRivenQueue(false); return; }
+  if (S.tab === "relics") { if (!RL.queue.running && RL.data) runRelicQueue(!RL.data.need); return; }
   S.parts.clear(); S.lite.clear(); queueMarket(true); toast(t("Запрашиваю свежие цены…"));
 });
 $("#search").addEventListener("input", (e) => { S.query = e.target.value; renderView(); });
 $("#dlg-update").addEventListener("click", (e) => { if (e.target === e.currentTarget) e.currentTarget.close(); });
 $("#dlg-update").addEventListener("close", () => { scheduleRecognizePoll(); checkPendingReading(); });
+$("#dlg-scan").addEventListener("click", (e) => { if (e.target === e.currentTarget) e.currentTarget.close(); });
+$("#dlg-scan").addEventListener("close", scheduleScanPoll);
 addEventListener("focus", () => {
   const job = R.state && R.state.job;
   if ($("#dlg-update").open && !(job && job.state === "running")) refreshRecognize(false);
+  const scan = SCAN.state && SCAN.state.job;
+  if ($("#dlg-scan").open && !(scan && scan.state === "running")) refreshScan(false);       // new F6 screenshots may be waiting
 });
 // screenshots dropped anywhere on the window go to the inbox folder (and never replace the page)
 addEventListener("dragover", (e) => { if (e.dataTransfer && [...e.dataTransfer.types].includes("Files")) e.preventDefault(); });
+// A screenshot that arrives while the riven mods or the relics are on the screen is meant for them.
+function screenshotKind() {
+  if ($("#dlg-scan").open) return SCAN.kind;
+  if ($("#dlg-update").open) return null;
+  return S.tab === "rivens" || S.tab === "relics" ? S.tab : null;
+}
+async function takeScreenshots(files) {
+  const kind = screenshotKind();
+  const busy = kind ? SCAN.kind === kind && SCAN.state && SCAN.state.job && SCAN.state.job.state === "running"
+    : R.state && R.state.job && R.state.job.state === "running";
+  if (busy) { toast(t("Идёт распознавание — добавьте скриншот после него.")); return; }
+  if (kind && S.data && S.data.demo) { toast(t("Сейчас показан пример. Уберите его, чтобы добавить своё.")); return; }
+  if (!(await uploadScreenshots(files, kind))) return;
+  if (kind) openScanDialog(kind); else openUpdateDialog();
+}
 addEventListener("drop", async (e) => {
   if (!e.dataTransfer || !e.dataTransfer.files.length) return;
   e.preventDefault();
-  if (await uploadScreenshots(e.dataTransfer.files)) openUpdateDialog();
+  takeScreenshots(e.dataTransfer.files);
 });
 // Ctrl+V anywhere in the window: a screenshot from the clipboard (PrintScreen, Win+Shift+S) or copied picture files
 addEventListener("paste", async (e) => {
@@ -3274,8 +3902,7 @@ addEventListener("paste", async (e) => {
   files = files.filter((f) => /^image\//.test(f.type || "") || /\.(png|jpe?g|webp|bmp)$/i.test(f.name || ""));
   if (!files.length) return;                 // ordinary text paste: leave it to the focused field
   e.preventDefault();
-  if (R.state && R.state.job && R.state.job.state === "running") { toast(t("Идёт распознавание — добавьте скриншот после него.")); return; }
-  if (await uploadScreenshots(files)) openUpdateDialog();
+  takeScreenshots(files);
 });
 document.addEventListener("click", (e) => {
   document.querySelectorAll(".add-box").forEach((box) => { if (!box.contains(e.target)) box.querySelector(".suggest").hidden = true; });

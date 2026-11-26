@@ -2,7 +2,9 @@
 
 Only public, read-only endpoints are used; no account, no token, no orders are
 ever placed.  The site's Terms of Service (section 11, "API") allow no more than
-3 requests per second -- see config.WFM_MIN_INTERVAL.
+3 requests per second for listings -- see config.WFM_MIN_INTERVAL -- and no more than
+10 per minute for contracts, as the site calls the auctions of riven mods -- see
+config.WFM_CONTRACT_MIN_INTERVAL.  Each kind goes through a limiter of its own.
 """
 from __future__ import annotations
 
@@ -130,6 +132,7 @@ class WfmClient:
     def __init__(self, cache: DiskCache):
         self.cache = cache
         self.api = Fetcher(config.WFM_MIN_INTERVAL, "warframe.market API")
+        self.contracts = Fetcher(config.WFM_CONTRACT_MIN_INTERVAL, "warframe.market contracts")
         self.assets = Fetcher(config.ASSET_MIN_INTERVAL, "warframe.market assets")
         self._key_locks: Dict[str, threading.Lock] = {}
         self._key_locks_guard = threading.Lock()
@@ -142,13 +145,13 @@ class WfmClient:
                 lock = self._key_locks[key] = threading.Lock()
             return lock
 
-    def _json(self, path: str, language: str = "en") -> Any:
+    def _json(self, path: str, language: str = "en", fetcher: Optional[Fetcher] = None) -> Any:
         headers = {
             "Accept": "application/json",
             "Language": language,
             "Platform": config.PLATFORM,
         }
-        raw = self.api.get(config.WFM_API + path, headers=headers)
+        raw = (fetcher or self.api).get(config.WFM_API + path, headers=headers)
         try:
             return json.loads(raw.decode("utf-8"))
         except ValueError as exc:
@@ -302,6 +305,79 @@ class WfmClient:
             return None
         return self.cache.get(f"wfm_stats_{slug}", None)
 
+    # -- riven mods -----------------------------------------------------------
+    def riven_weapons(self, language: str = "en", force: bool = False) -> Tuple[List[dict], Dict[str, Any]]:
+        """Every weapon a riven mod can be for: slug, kind, the English name and the name in
+        `language` (a code of warframe.market).  An ordinary listing request.
+
+        The site still gives a "disposition" for each weapon; the game retired dispositions in
+        hotfix 44.1.3 (October 2026: every riven mod has one multiplier now), so it is not taken."""
+        if not re.fullmatch(r"[a-z]{2}(-[a-z]{2,4})?", language or ""):
+            raise FetchError(f"bad language {language!r}")
+
+        def load():
+            data = self._json("/v2/riven/weapons", language).get("data")
+            if not isinstance(data, list) or len(data) < 100:
+                raise FetchError("unexpected /v2/riven/weapons payload")
+            slim = []
+            for it in data:
+                names = it.get("i18n") or {}
+                en = names.get("en") or {}
+                own = names.get(language) or {}
+                if not valid_slug(str(it.get("slug") or "")) or not en.get("name"):
+                    continue
+                slim.append({
+                    "slug": it["slug"],
+                    "group": it.get("group") or "",
+                    "riven_type": it.get("rivenType") or "",
+                    "en": en["name"],
+                    "name": own.get("name") or en["name"],
+                    "thumb": en.get("thumb") or own.get("thumb") or "",
+                })
+            return slim
+        return self._cached(f"wfm_riven_weapons_{language}", config.TTL_RIVEN_WEAPONS, load, force)
+
+    def riven_offers(self, slug: str, force: bool = False) -> Tuple[dict, Dict[str, Any]]:
+        """The cheapest riven mods of one weapon that are on sale at a fixed price, the cheapest first.
+
+        The site calls these auctions "contracts" and gives them a limit of their own -- 10 requests a
+        minute -- so they go through a limiter of their own (config.WFM_CONTRACT_MIN_INTERVAL) and
+        are remembered for an hour.  Returns {"offers": [...], "listed": how many the site gave (it
+        gives 100 at most)}.
+        """
+        if not valid_slug(slug):
+            raise FetchError(f"bad slug {slug!r}")
+
+        def load():
+            path = f"/v1/auctions/search?type=riven&weapon_url_name={slug}&sort_by=price_asc&buyout_policy=direct"
+            found = (self._json(path, fetcher=self.contracts).get("payload") or {}).get("auctions")
+            if not isinstance(found, list):
+                raise FetchError(f"unexpected auctions payload for {slug}")
+            offers = []
+            for auction in found:
+                item = auction.get("item") or {}
+                owner = auction.get("owner") or {}
+                price = auction.get("buyout_price")
+                if (auction.get("closed") or auction.get("private") or auction.get("visible") is False
+                        or item.get("type") != "riven" or item.get("weapon_url_name") != slug
+                        or isinstance(price, bool) or not isinstance(price, (int, float)) or price <= 0):
+                    continue
+                offers.append({
+                    "platinum": price,
+                    "status": owner.get("status"),
+                    "name": item.get("name"),
+                    "rerolls": item.get("re_rolls"),
+                })
+            offers.sort(key=lambda o: o["platinum"])
+            return {"offers": offers, "listed": len(found)}
+        return self._cached(f"wfm_riven_{slug}", config.TTL_RIVEN_OFFERS, load, force)
+
+    def riven_offers_cached(self, slug: str) -> Optional[Tuple[dict, float]]:
+        """What the last riven_offers() of this weapon returned and when -- however old, without any request."""
+        if not valid_slug(slug):
+            return None
+        return self.cache.get(f"wfm_riven_{slug}", None)
+
     def thumbnail(self, rel_path: str) -> Optional[Tuple[bytes, str]]:
         """Item picture from the site's static assets, cached forever. Returns (bytes, mime)."""
         if not _THUMB_RE.match(rel_path or "") or ".." in rel_path:
@@ -327,5 +403,6 @@ class WfmClient:
             "api_requests": self.api.requests_made,
             "api_errors": self.api.errors,
             "api_last_error": self.api.last_error,
+            "contract_requests": self.contracts.requests_made,
             "asset_requests": self.assets.requests_made,
         }

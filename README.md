@@ -21,6 +21,11 @@ sell, with live prices from warframe.market.
 - **"Sold"** — one button takes the parts of a sold set out of the inventory and writes the deal
   into a journal, so the list stays right between two rounds of screenshots.
 - **Collection** — every Prime set at once: what is mastered, what is complete, what is started.
+- **Riven mods** — your Riven Mods read from a screenshot, each with the bottom of the market: what
+  the cheapest Riven Mod for the same weapon is offered for on warframe.market, in all and among
+  sellers who are online right now.
+- **Relics** — your Void Relics read from screenshots and ranked by what refining them to Radiant
+  adds to one opening: the ten most worth their Void Traces come first.
 - **History** — what changed after every update of your inventory, what your sets are worth over
   time, and what you have earned from sales.
 - **Screenshots with hints** — while you scroll the inventory and press F6, the app picks the
@@ -76,7 +81,8 @@ and nothing is built into the app.
   whether the key works.
 
 **What has been tested.** Reading through Claude Code was checked on real screenshots (Russian
-client, 2560×1440: 51 screenshots, every part matched). The other five connections are covered by
+client, 2560×1440: 51 screenshots, every part matched; the Riven Mod and relic screens — one
+screenshot of each). The other five connections are covered by
 automated tests against the documented request and answer formats, but have not been run against
 real accounts yet, and game clients in languages other than Russian have not been tried on real
 screenshots either. If something reads wrong, please [open an issue](https://github.com/nazdrec/PrimeLedger/issues) with the screenshot.
@@ -104,6 +110,15 @@ every F6 the app picks the screenshot up by itself and checks that it continues 
 a short sound means all is well, three low ones mean a row was skipped — go one screen back and
 press F6 again. The sound can be switched off.
 
+**Riven mods and relics.** These two tabs have a button of their own, *Update from screenshots*.
+For Riven Mods, open the list of mods in the game so that the Riven Mods are on the screen and press
+F6 (every screen of the list, if they do not fit on one). For relics, go where you shoot the Prime
+parts — *Inventory → Sell* — choose the *Relics* category and press F6 on every screen of the list,
+scrolling three rows at a time; a tile that is on two screenshots is counted once. The screenshots
+wait in folders of their own and are read by the same connection as the inventory.
+
+![PrimeLedger: Void Relics ranked by what refining them to Radiant adds to one opening](docs/screenshot-relics.png)
+
 Any number can be corrected by hand on the *All parts* tab, and a mastery mark by clicking it.
 A sold set is easiest to take off the list with the *Sold…* button in its row.
 
@@ -117,6 +132,9 @@ A sold set is easiest to take off the list with the *Sold…* button in its row.
   and answers are cached. The app places no orders and sends nothing to the game chat: messages
   to sellers are copied by you. A message keeps the site's own format and names the app, as the
   site's API rules ask.
+- The prices of Riven Mods come from the site's auctions (it calls them contracts), which have a limit
+  of their own: 10 requests a minute. The app makes one such request in 8 seconds and keeps the
+  answers for an hour.
 - "Screenshots with hints" reads only the files the game has already saved to its own screenshot folder.
   The app does not capture the screen, presses no keys and has no contact with the game.
 - The app cannot see a trade: the journal of sales is what you marked yourself with the "Sold"
@@ -141,6 +159,14 @@ This project is not affiliated with Digital Extremes or warframe.market.
 - **Complete set** — by the set's composition on warframe.market: a part needed twice is counted twice.
 - **Ducats per platinum** — the ducats of all parts of a set divided by the price of its cheapest in-game seller.
 - **Mastery** — only from your screenshots or your own marks: Digital Extremes has no public account data.
+- **Bottom of the market** (Riven Mods) — the lowest buyout price among the Riven Mods for the same
+  weapon listed on warframe.market, and next to it the lowest among sellers who are in the game or on
+  the site. It is not an appraisal of your mod: its stats are not taken into account.
+- **After refinement** (Relics) — one opening is valued as the prices of the six rewards by their
+  chances (the rare reward: 2 % in an intact relic, 10 % in a radiant one; the contents come from the
+  official drop tables); the column shows how much more a radiant relic brings than the relic as it
+  is. The list is ordered by this gain per 100 Void Traces; relics that no longer drop get 30 % on
+  top, relics from special sources 15 %. The figures are for opening alone.
 
 The same explanations are in the app, under *How it is calculated and where the data comes from*.
 
